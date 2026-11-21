@@ -21,8 +21,10 @@
 //   MOUNTAINS_CAMERA=plaza|atalaya|baldy|aerial, or "x,z,above,yaw,pitch" (m, radians; yaw 0 = east)
 //   MOUNTAINS_CAPTURE=<file>       save a screenshot once everything has generated, then exit
 //
+//   MOUNTAINS_RENDERER=basic       the engine's basic renderer instead of renderer/ (M3)
+//
 // Controls: WASD move, R/F up/down, mouse look (Esc releases, click captures), Shift x20, Ctrl x0.1,
-// G walk (stay 1.7 m over the ground).
+// G walk (stay 1.7 m over the ground), [ ] lower / raise the sun, , . turn it.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -31,6 +33,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -44,9 +47,15 @@
 #include "core/application.h"
 #include "core/log.h"
 #include "core/math.h"
+#include "core/paths.h"
 #include "graphics/basic_renderer.h"
+#include "graphics/camera.h"
+#include "graphics/disk_io.h"
+#include "graphics/engine_shaders.h"
 #include "graphics/gpu_interface.h"
 #include "graphics/input.h"
+#include "graphics/manage_resources.h"
+#include "graphics/perform_renderer.h"
 #include "graphics/render_instance.h"
 #include "mountains/columns.hpp"
 #include "mountains/landform.hpp"
@@ -418,6 +427,14 @@ struct State {
     Clipmap clipmap;
     std::unique_ptr<Pool> pool;
     Camera camera;
+    std::shared_ptr<projv::ConstructedRenderer> renderer;   // null: the basic renderer
+    float sunAzimuth = 250.0f, sunElevation = 22.0f;   // degrees; azimuth clockwise from north
+    projv::CameraView lastView;
+    bool profiling = false;   // during a capture's settled seconds: GPU time by pass
+    double passMs[32] = {};
+    double gpuFrameMs = 0;
+    int profiled = 0;
+    int renderFrame = 0;
     double cameraAbove = 0;   // over the ground, refreshed a few times a second
     Clock::time_point groundCheck;
     Clock::time_point started = Clock::now();
@@ -476,8 +493,145 @@ void report(State& st, projv::Scene& scene) {
                       double(bytes) / 1048576.0);
 }
 
+// ---- The renderer (plan D11; renderer/, forked from the gallery's fast) ----------------------------
+
+// The air, as mountains_sky.sc models it: sea-level-relative air density, haze, the haze's forward
+// scattering, and multiple scattering's share. High, dry air: the haze is light.
+projv::core::vec4 kAtmosphere{1.0f, 0.15f, 0.6f, 0.8f};
+constexpr double kSunIrradiance = 6.0;   // above the air, in the renderer's units
+float kExposure = 1.7f;
+
+// MOUNTAINS_AIR="density,haze,g,multiple" and MOUNTAINS_EXPOSURE override the above, for tuning.
+void readLookEnvironment() {
+    if (const char* air = std::getenv("MOUNTAINS_AIR"))
+        std::sscanf(air, "%f,%f,%f,%f", &kAtmosphere.x, &kAtmosphere.y, &kAtmosphere.z, &kAtmosphere.w);
+    if (const char* e = std::getenv("MOUNTAINS_EXPOSURE")) kExposure = float(std::atof(e));
+}
+
+vec3 sunDirection(const State& st) {
+    const double az = st.sunAzimuth * kPi / 180.0, el = st.sunElevation * kPi / 180.0;
+    return vec3(float(std::sin(az) * std::cos(el)), float(std::sin(el)), float(std::cos(az) * std::cos(el)));
+}
+
+// The sun's light at height y: what is left after the air and the ozone above it along the sun's
+// path (Kasten-Young airmass), so a low sun is warm and dim, and nothing once it has set. The ozone
+// (Chappuis band) takes out green on a long path, which is why a twilight sky is blue and pink and not
+// green.
+vec3 sunIrradianceAt(const State& st, double y) {
+    const double el = st.sunElevation;
+    const double airmass = 1.0 / (std::sin(std::max(el, 0.0) * kPi / 180.0) + 0.50572 * std::pow(std::max(el, 0.0) + 6.07995, -1.6364));
+    const double beta[3] = {5.8e-6, 13.5e-6, 33.1e-6};
+    const double ozone[3] = {0.65e-6, 1.881e-6, 0.085e-6};   // per metre, at the layer's peak
+    const double ozoneThickness = 15000.0;                   // its column, as metres at peak density
+    const double white[3] = {1.0, 0.985, 0.955};
+    const double haze = 3.0e-6 * kAtmosphere.y * 1.11 * 1200.0 * std::exp(-y / 1200.0);
+    const double up = smoothstep(-1.0, 2.0, el);
+    float c[3];
+    for (int i = 0; i < 3; ++i) {
+        const double tau = (beta[i] * kAtmosphere.x * 8000.0 * std::exp(-y / 8000.0) + haze + ozone[i] * ozoneThickness) * airmass;
+        c[i] = float(kSunIrradiance * white[i] * std::exp(-tau) * up);
+    }
+    return vec3(c[0], c[1], c[2]);
+}
+vec3 sunIrradiance(const State& st) { return sunIrradianceAt(st, st.camera.y); }
+
+std::shared_ptr<projv::ConstructedRenderer> buildRenderer(projv::graphics::RenderInstance& ri) {
+    readLookEnvironment();
+    projv::RendererSpecification spec = projv::graphics::loadRendererSpecification("./renderer/");
+    ri.addRendererSpecification(1, spec);
+    static const bgfx::ShaderHandle vsh = projv::graphics::loadEngineShader("vs_quad");
+    auto renderer = projv::graphics::constructRendererSpecification(ri.getRendererSpecification(1), vsh);
+    // Texture 1: the noise the SSAO turns its samples by. White noise from a hash; the blur after it
+    // does the rest.
+    std::vector<unsigned char> noise(256 * 256 * 4);
+    for (uint32_t i = 0; i < 256u * 256u; ++i)
+        for (uint32_t c = 0; c < 4; ++c) noise[i * 4 + c] = uint8_t(hash32(i * 4 + c + 12345u) >> 24);
+    projv::graphics::setTextureToData(renderer, 1, noise.data(), 256, 256);
+    ri.setActiveRenderer(renderer);
+    return renderer;
+}
+
+void render(projv::Application& app) {
+    State& st = app.world.ctx().get<State>();
+    if (!st.renderer) return;
+    auto& ri = app.world.ctx().get<projv::graphics::RenderInstance>();
+    auto& scene = app.world.ctx().get<projv::Scene>();
+    auto& gpu = app.world.ctx().get<projv::GPUData>();
+    projv::graphics::flushSceneUpdates(scene, gpu);
+    const projv::CameraView& view = app.world.ctx().get<projv::CameraView>();
+    projv::graphics::setCamera(*st.renderer, view);
+    const bool moved = view.position != st.lastView.position || view.forward != st.lastView.forward;
+    st.lastView = view;
+    const auto& r = st.renderer;
+    const bgfx::Stats* stats = bgfx::getStats();
+    const projv::core::vec2 res(float(std::max<uint16_t>(stats->width, 1)), float(std::max<uint16_t>(stats->height, 1)));
+    projv::core::vec2 window = res;
+    projv::core::vec2 texel(1.0f / res.x, 1.0f / res.y);
+    projv::core::vec4 frame(float(st.renderFrame), moved ? 1.0f : 0.0f, 0.0f, 0.0f);
+    const vec3 sd = sunDirection(st);
+    projv::core::vec4 sun(sd.x, sd.y, sd.z, 0.0f);
+    projv::core::vec4 ao(4.0f, 1.0f, 2.0f, 1.0f);   // radius (voxels), intensity, power, blur on
+    auto halton = [](int index, int base) {
+        float f = 1.0f, v = 0.0f;
+        for (; index > 0; index /= base) { f /= float(base); v += f * float(index % base); }
+        return v;
+    };
+    const int phase = st.renderFrame % 16 + 1;
+    projv::core::vec4 jitter(halton(phase, 2) - 0.5f, halton(phase, 3) - 0.5f, 0.0f, 0.0f);
+    // MOUNTAINS_DEBUG: "noshadow", "noskip" (for measuring what each costs).
+    static const std::string debug = std::getenv("MOUNTAINS_DEBUG") ? std::getenv("MOUNTAINS_DEBUG") : "";
+    projv::core::vec4 params(debug.find("noshadow") != std::string::npos ? 1.0f : 0.0f,
+                             debug.find("noskip") != std::string::npos ? 1.0f : 0.0f, 0.0f, 0.0f);
+    projv::core::vec4 temporal(64.0f, st.renderFrame == 0 ? 1.0f : 0.0f, 0.0f, 0.0f);
+    const vec3 irr = sunIrradiance(st);
+    projv::core::vec4 mtnSun(irr.x, irr.y, irr.z, kExposure);
+    projv::core::vec4 atmos = kAtmosphere;
+    projv::graphics::setUniformToValue(r, "windowRes", window);
+    projv::graphics::setUniformToValue(r, "texelSize", texel);
+    projv::graphics::setUniformToValue(r, "frameCount", frame);
+    projv::graphics::setUniformToValue(r, "sunDir", sun);
+    projv::graphics::setUniformToValue(r, "fastSettings", ao);
+    projv::graphics::setUniformToValue(r, "jitterParams", jitter);
+    projv::graphics::setUniformToValue(r, "renderParams", params);
+    projv::graphics::setUniformToValue(r, "fastTemporal", temporal);
+    projv::graphics::setUniformToValue(r, "mtnSun", mtnSun);
+    projv::graphics::setUniformToValue(r, "mtnAtmos", atmos);
+    const vec3 air = sunIrradianceAt(st, st.camera.y + 6000.0);
+    projv::core::vec4 mtnSunAir(air.x, air.y, air.z, 0.0f);
+    projv::graphics::setUniformToValue(r, "mtnSunAir", mtnSunAir);
+    projv::graphics::renderConstructedRenderer(ri, r, &gpu);
+    ++st.renderFrame;
+    if (st.profiling) {
+        const bgfx::Stats* gs = bgfx::getStats();
+        if (gs && gs->gpuTimerFreq > 0) {
+            const double toMs = 1000.0 / double(gs->gpuTimerFreq);
+            st.gpuFrameMs += double(gs->gpuTimeEnd - gs->gpuTimeBegin) * toMs;
+            for (uint16_t v = 0; v < gs->numViews; ++v)
+                if (gs->viewStats[v].view < 32)
+                    st.passMs[gs->viewStats[v].view] += double(gs->viewStats[v].gpuTimeEnd - gs->viewStats[v].gpuTimeBegin) * toMs;
+            ++st.profiled;
+        }
+    }
+}
+
+void reportPasses(State& st, projv::graphics::RenderInstance& ri) {
+    if (!st.profiled) return;
+    const projv::RendererSpecification& spec = ri.getRendererSpecification(1);
+    std::string line = "[MOUNTAINS] GPU " + std::to_string(st.gpuFrameMs / st.profiled).substr(0, 5) + " ms:";
+    const auto& passes = spec.dependencyGraph.renderPasses;
+    for (size_t v = 0; v < passes.size() && v < 32; ++v) {
+        std::string name = std::to_string(passes[v].shaderID);
+        for (const projv::Shader& shader : spec.resources.shaders)
+            if (shader.shaderID == passes[v].shaderID) name = std::filesystem::path(shader.filePath).stem().string();
+        line += " " + name + " " + std::to_string(st.passMs[v] / st.profiled).substr(0, 5);
+    }
+    projv::core::info("{}", line);
+}
+
 void startup(projv::Application& app) {
     auto& ri = app.world.ctx().emplace<projv::graphics::RenderInstance>();
+    // A capture asks for exactly its size, so a tiling window manager floats it rather than fitting it.
+    if (std::getenv("MOUNTAINS_CAPTURE")) ri.resizable = false;
     ri.initialize(1600, 900, "ProjectV Mountains");
     projv::graphics::installPlatform(app, ri);
     auto& scene = app.world.ctx().emplace<projv::Scene>();
@@ -488,12 +642,24 @@ void startup(projv::Application& app) {
     setUpRings(st, scene);
     placeCamera(st.camera, *st.land);
     st.cameraAbove = std::max(0.0, st.camera.y - st.land->height(st.camera.x, st.camera.z, 8.0));
+    // MOUNTAINS_SUN="azimuth,elevation" in degrees (azimuth clockwise from north).
+    if (const char* sun = std::getenv("MOUNTAINS_SUN")) std::sscanf(sun, "%f,%f", &st.sunAzimuth, &st.sunElevation);
     st.pool = std::make_unique<Pool>(*st.land, st.palette, std::max(2u, std::thread::hardware_concurrency() - 2));
     placeRings(st.clipmap, scene, st.pool.get(), st.camera.x, st.camera.z, st.cameraAbove);
     projv::core::info("[MOUNTAINS] {} rings of {} cells, {} workers; the outer ring reaches {:.0f} km",
                       st.clipmap.rings, st.clipmap.span(), st.pool->threads(),
                       cellSize(st.clipmap.rings - 1) * double(st.clipmap.radius) / 1000.0);
 
+    std::filesystem::current_path(projv::core::executableDirectory());   // renderer/ names its shaders from here
+    const char* which = std::getenv("MOUNTAINS_RENDERER");
+    if (!which || std::string(which) != "basic") {
+        st.renderer = buildRenderer(ri);
+        app.world.ctx().emplace<projv::CameraView>();
+        app.world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
+        if (const char* cap = std::getenv("MOUNTAINS_CAPTURE")) st.capturePath = cap;
+        else projv::graphics::setCursorCaptured(app, ri, true);
+        return;
+    }
     projv::graphics::BasicRendererOptions look;
     look.sunDirection = vec3(-0.80f, 0.42f, -0.30f);   // late afternoon, west-southwest
     look.sunColour = vec3(1.05f, 0.98f, 0.90f);
@@ -508,6 +674,7 @@ void startup(projv::Application& app) {
     else projv::graphics::setCursorCaptured(app, ri, true);
 }
 
+
 void moveCamera(projv::Application& app) {
     auto& ri = app.world.ctx().get<projv::graphics::RenderInstance>();
     const auto& input = app.world.ctx().get<projv::Input>();
@@ -521,6 +688,11 @@ void moveCamera(projv::Application& app) {
         cam.pitch = std::clamp(cam.pitch - input.cursorDelta.y * 0.0025f, -1.55f, 1.55f);
     }
     if (input.pressed(projv::Key::G)) cam.walk = !cam.walk;
+    const float sunStep = 15.0f * app.time().delta;
+    if (input.down(projv::Key::LeftBracket)) st.sunElevation = std::max(-5.0f, st.sunElevation - sunStep);
+    if (input.down(projv::Key::RightBracket)) st.sunElevation = std::min(89.0f, st.sunElevation + sunStep);
+    if (input.down(projv::Key::Comma)) st.sunAzimuth -= sunStep * 3.0f;
+    if (input.down(projv::Key::Period)) st.sunAzimuth += sunStep * 3.0f;
     double speed = cam.walk ? 4.0 : 40.0;
     if (input.down(projv::Key::LeftShift)) speed *= 20.0;
     if (input.down(projv::Key::LeftControl)) speed *= 0.1;
@@ -580,6 +752,10 @@ void stream(projv::Application& app) {
                 st.captureStage = 1;
                 st.settledAt = Clock::now();
                 st.settledFrames = 0;
+                if (st.renderer) {
+                    bgfx::setDebug(BGFX_DEBUG_PROFILER);
+                    st.profiling = true;
+                }
             }
         } else if (st.captureStage == 1) {
             ++st.settledFrames;
@@ -589,6 +765,8 @@ void stream(projv::Application& app) {
                 (void)ri;
                 projv::core::info("[MOUNTAINS] settled: {:.2f} ms/frame over {} frames", s * 1000.0 / st.settledFrames,
                                   st.settledFrames);
+                st.profiling = false;
+                reportPasses(st, app.world.ctx().get<projv::graphics::RenderInstance>());
                 bgfx::requestScreenShot(BGFX_INVALID_HANDLE, st.capturePath.c_str());
                 st.captureStage = 2;
             }
@@ -658,6 +836,7 @@ int main(int argc, char** argv) {
     app.addSystem(projv::Stage::Startup, "startup", startup);
     app.addSystem(projv::Stage::Update, "move camera", moveCamera);
     app.addSystem(projv::Stage::Update, "stream", stream, {.after = "move camera"});
+    app.addSystem(projv::Stage::Render, "render", render);
     app.addSystem(projv::Stage::Shutdown, "shutdown", shutdown);
     app.run();
     return 0;

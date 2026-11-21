@@ -1,6 +1,6 @@
 # Mountains: the Sangre de Cristo at Santa Fe
 
-Status: **approved**, 2026-11-21. **M1, M2 built** (awaiting the user's look); M3 next. A new example, `examples/55-mountains` (target
+Status: **approved**, 2026-11-21. **M1, M2, M3 built** (awaiting the user's look); M4 next. A new example, `examples/55-mountains` (target
 `mountains`), that generates mountains in the style of those around Santa Fe and draws them with a fast
 renderer of its own: voxels all the way to a horizon about 100 km out, detailed underfoot. It leaves
 `50-terrain-generator` (canyonlands, alpine) as it is.
@@ -16,7 +16,7 @@ infinite), not real elevation data.
 | G1 | Reads as the Sangres from Santa Fe: a piedmont ramp, foothills, a long crest 1.5 km above town, other ranges on the horizon | Side by side with reference photos, judged by the user |
 | G2 | Sells scale: a range 60-70 km off is visibly far (aerial perspective), and nothing pops or shimmers as it scrolls | Fly captures; still-camera captures with no flicker |
 | G3 | Detailed underfoot: rocks, soil, junipers and pinyons at about 0.25 m a voxel | Walk captures |
-| G4 | Fast | >= 60 fps at 1440p on this machine standing still; flying at 300 m/s, the horizon keeps up |
+| G4 | Fast | Flying at 300 m/s, the horizon keeps up. >= 60 fps at 1440p on a discrete GPU (RTX 4070 class; to be measured there). This machine is an integrated Radeon 860M: playable, ~50 fps at 1600 x 900 (as built, M3) |
 | G5 | Infinite and seedable; a pure function of position, so chunks generate on any thread in any order | `MOUNTAINS_SEED`, seam tests |
 
 ## Reference (research, 2026-11-21)
@@ -182,6 +182,36 @@ engine's basic renderer.
   rings 1-3).
 - Seams: none from geometry or colour statistics. A faint straight line remains where two rings meet on
   flat ground (voxel steps of two sizes side by side); M3's light may hide it.
+
+## M3 as built (2026-11-21)
+
+`examples/55-mountains/renderer/` (render.json, resources.json, shaders/, include/mountains_sky.sc), forked
+from the gallery's `fast`; `MOUNTAINS_RENDERER=basic` keeps the engine's basic renderer.
+
+- **Atmosphere** (`mountains_sky.sc`): two exponential layers (air 8 km, haze 1.2 km), optical depth in
+  closed form along each ray, single scattering with the sun's light constant along the ray plus an
+  isotropic share for multiple scattering. It is the sky, the ambient the SSAO gathers (sunlit ground
+  below the horizon), and the aerial perspective on every surface (in `combine_blur`). The Jemez reads as a
+  low blue band 60 km off.
+- **Sun colour** on the CPU: Kasten-Young airmass through air, haze and ozone (Chappuis). Two of them: at
+  the camera (lights surfaces) and 6 km higher (lights the air). With one, a low sun's orange times the
+  air's blue made an olive-green sky; with the air's own (less reddened) sun and ozone it stays blue, and
+  the range glows red-pink at a 4-degree sun.
+- **Voxel-sized** shadow-ray offset and SSAO radius (4 voxels): the voxels run from 0.25 m to 256 m.
+- **A depth pre-pass** (`depth_pre`, an eighth of the window each way): each G-buffer ray starts a little
+  short of the nearest of the nine pre-pass rays around it. No artefacts seen.
+- **Look**: a grade in `display` (contrast 1.08, saturation 1.2, a touch cool), exposure 1.7, albedos
+  darkened to 0.70-0.95 of the map colours, soils pinker (adobe). `MOUNTAINS_AIR`, `MOUNTAINS_EXPOSURE`,
+  `MOUNTAINS_SUN` for tuning; `[ ]` and `, .` move the sun.
+- **Cost** on this machine (Radeon 860M iGPU, ~900 x 1160 window, the Plaza view, settled): GPU 17-18 ms:
+  pre-pass 1.1-1.7, G-buffer 10.6 (camera rays ~7.3, shadow rays ~3.3), SSAO 0.5, combine 0.6, reconstruct
+  2.5, resolve 0.8. The pre-pass saved only ~1 ms: the cost is not the empty rings in front but rays
+  skimming the ground near where they hit. A mostly-sky view: 5 ms. `MOUNTAINS_DEBUG=noshadow,noskip`
+  measures the parts; a capture prints GPU time by pass.
+- Fixed on the way: `projv_add_example`'s staging target could copy a renderer folder before its shaders
+  compiled (CMake 3.26+), so a fresh build ran with no `.bin`; it now waits for the shader target.
+- Open: the horizon toward a low sun goes a little yellow (single scattering, no real multiple
+  scattering); the renderer's speed on a discrete GPU.
 
 ## Open questions
 

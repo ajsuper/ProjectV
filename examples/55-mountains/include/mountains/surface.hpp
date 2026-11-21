@@ -22,9 +22,9 @@ inline Rgb lerp(Rgb a, Rgb b, double t) { return a * (1.0 - t) + b * t; }
 // Albedo, display (sRGB-ish) values.
 inline Rgb materialColour(Material m) {
     switch (m) {
-        case Material::Soil: return {0.72, 0.58, 0.45};
-        case Material::Grama: return {0.72, 0.63, 0.46};
-        case Material::Sediment: return {0.82, 0.67, 0.53};
+        case Material::Soil: return {0.71, 0.60, 0.53};   // Santa Fe's pinkish adobe tan
+        case Material::Grama: return {0.69, 0.64, 0.51};
+        case Material::Sediment: return {0.80, 0.68, 0.59};
         case Material::Pinyon: return {0.22, 0.28, 0.17};
         case Material::Ponderosa: return {0.19, 0.26, 0.15};
         case Material::Fir: return {0.11, 0.18, 0.12};
@@ -39,10 +39,12 @@ inline Rgb materialColour(Material m) {
         default: return {1, 0, 1};
     }
 }
-// Shade s of material m: brightness 0.82 .. 1.12, slightly warmer as it brightens.
+// Shade s of material m: brightness 0.70 .. 0.95 of the class colour (the class colours are what a
+// map shows; voxels under the renderer's sun want darker albedos: desert soil is ~0.3), slightly
+// warmer as it brightens.
 inline Rgb shadeColour(Material m, int s) {
     const double t = double(s) / double(kShades - 1);
-    const double k = 0.82 + 0.30 * t;
+    const double k = 0.70 + 0.25 * t;
     Rgb c = materialColour(m) * k;
     c.r *= 1.0 + 0.03 * (t - 0.5);
     c.b *= 1.0 - 0.03 * (t - 0.5);

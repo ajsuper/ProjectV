@@ -117,6 +117,12 @@ function(projv_add_example name)
                 "the target name -- staging it would collide with the executable. Rename one.")
         endif()
         projv_stage_directory(${name} "${CMAKE_CURRENT_SOURCE_DIR}/${assetDir}" "${exampleBinaryDir}/${assetDir}")
+        # The staging target runs on its own (CMake 3.26+): without this a parallel build can copy the
+        # renderer folder before its shaders are compiled, and the program finds no .bin.
+        get_filename_component(stagedLeaf "${assetDir}" NAME)
+        if(PROJV_STAGE_AFTER_SHADERS AND TARGET ${name}_stage_${stagedLeaf})
+            add_dependencies(${name}_stage_${stagedLeaf} ${name}_shaders)
+        endif()
     endforeach()
 
     # The demos' shared UI (docs/plans/ui.md, D13): a style sheet and fonts, beside the program's own
