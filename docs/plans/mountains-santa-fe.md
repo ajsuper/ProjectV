@@ -287,7 +287,12 @@ screen-space normal smoothing (normal_smooth) stays for the outer voxel rings ne
   far field: 19 ms G-buffer.
 - `--selftest` now flies out and back and requires the same chunks and blobs live at the end as at the
   start (a leak test that does not depend on how wooded the ground is).
-- Open: the hand-off at ~2 km shows (voxel woodland against smooth ground); the detail's strength; speed.
+- Second pass (the user: a soft blur of colour on far hills, undetailed, a hard hand-off): a grain in the
+  far colour, isotropic, down to a pixel (darker and stronger where it is forest: crowns and their shade);
+  the gully normals 1.5x stronger; and over the outer part of the last voxel ring (60-97% of its half-width)
+  voxel hits take the far field's normal and colour at the same place, so only the silhouette changes
+  where the far field takes over (gNormal.w marks them, and normal_smooth leaves them be).
+- Open: speed (GPU ~24 ms at ~1 MP on the iGPU).
 
 ## M6, so far (2026-11-21)
 

@@ -86,6 +86,8 @@ void main() {
     current.origin = ray.origin + ray.direction * skip;
     // Each ray, the camera's then the shadow's, meets the voxels first and then, past them, the far field.
     bool farHit = false;
+    vec3 blendNormal = vec3(0.0, 1.0, 0.0);
+    float blendAmount = 0.0;
     for (int i = 0; i < 2; i++) {
         bool voxelHit = false;
         PjvSceneIntersectData found;
@@ -116,6 +118,25 @@ void main() {
             rotation = pjvHeader(int(found.headerIndex)).rotation;
             vec3 centre = found.foundBox.position + pjvRotationFromQuat(rotation) * vec3(edge * 0.5, edge * 0.5, edge * 0.5);
             face = vec4(centre + normal * (edge * 0.5), edge);
+            // Toward the edge of the voxels, their shading turns into the far field's at the same place, so
+            // nothing changes but the silhouette where the far field takes over.
+            {
+                vec4 B = mtnVoxelBox;
+                if (B.x < B.z) {
+                    vec2 halfSize = 0.5 * (B.zw - B.xy);
+                    vec2 rel = abs(position.xz - 0.5 * (B.xy + B.zw)) / halfSize;
+                    float w = smoothstep(0.6, 0.97, max(rel.x, rel.y));
+                    float hFar;
+                    int fFar;
+                    if (w > 0.0 && mtnFarHeight(position.xz, hFar, fFar) && abs(position.y - hFar) < 3.0 * edge + 15.0) {
+                        vec3 nFar, aFar;
+                        mtnFarSurface(fFar, position.xz, distance * 2.0 * pjvViewTanHalfFov() / (res.y * 2.0), nFar, aFar);
+                        albedo = mix(albedo, aFar, w);
+                        blendNormal = nFar;
+                        blendAmount = w;
+                    }
+                }
+            }
             // The sun, through one hard shadow ray. Only whether it gets there is stored (gDirect.r):
             // combine_blur works out how much it lights with the smoothed normal (normal_smooth), which
             // may face the sun where this face does not -- the riser of a step on a slope that does.
@@ -149,11 +170,7 @@ void main() {
         farHit = true;
         distance = tFar + skip;
         position = ray.origin + ray.direction * distance;
-        normal = mtnFarNormal(ring, position.xz);
-        float texelAt = mtnFarRing(ring).z / float(MTN_FAR_RES);
-        float tone;
-        normal = mtnFarDetail(normal, position.xz, texelAt, distance * 2.0 * pjvViewTanHalfFov() / (res.y * 2.0), tone);
-        albedo = pjvSrgbToLinear(mtnFarColour(ring, position.xz)) * clamp(1.0 + 0.35 * tone, 0.6, 1.3);
+        mtnFarSurface(ring, position.xz, distance * 2.0 * pjvViewTanHalfFov() / (res.y * 2.0), normal, albedo);
         face = vec4(position, 0.0);   // not a voxel: the reconstruction upsamples it (D17)
         direct = vec3(0.0, 0.0, 0.0);
         if (dot(normal, SUN_DIR) <= -0.2) break;
@@ -172,7 +189,10 @@ void main() {
     vec2 thenUV = pjvPrevViewUV(then, res, thenInFront);
 
     gl_FragData[0] = vec4(position, distance);
-    gl_FragData[1] = vec4(normal, 0.0);
+    // The normal shading reads (normal_smooth passes gNormal.w > 0 through as is): the voxel's own,
+    // turned toward the far field's near the voxels' edge.
+    if (blendAmount > 0.0) normal = normalize(mix(normal, blendNormal, blendAmount));
+    gl_FragData[1] = vec4(normal, blendAmount);
     gl_FragData[2] = vec4(albedo, 0.0);
     gl_FragData[3] = vec4(direct, hit ? 1.0 : 0.0);
     gl_FragData[4] = face;

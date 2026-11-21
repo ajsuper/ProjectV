@@ -31,11 +31,13 @@ SAMPLER2D(gAlbedo, 3);
 void main() {
     vec2 uv = v_texcoord0;
     vec4 p0 = texture2D(gPos, uv);
-    vec3 n0 = texture2D(gNormal, uv).xyz;
+    vec4 n0w = texture2D(gNormal, uv);
+    vec3 n0 = n0w.xyz;
     vec3 a0 = texture2D(gAlbedo, uv).rgb;
     if (p0.w < 0.0) { gl_FragData[0] = vec4(0.0, 1.0, 0.0, 0.0); gl_FragData[1] = vec4(a0, 0.0); return; }
     float faceEdge = texture2D(gFace, uv).w;
-    if (faceEdge <= 0.0) { gl_FragData[0] = vec4(n0, 1.0); gl_FragData[1] = vec4(a0, 1.0); return; }   // the far field: smooth already
+    // The far field, or voxels shaded as it near the voxels' edge (gNormal.w): taken as they are.
+    if (faceEdge <= 0.0 || n0w.w > 0.5) { gl_FragData[0] = vec4(n0, 1.0); gl_FragData[1] = vec4(a0, 1.0); return; }   // the far field: smooth already
     float edge = faceEdge;
     // How many render texels the voxel spans.
     float texelWorld = p0.w * 2.0 * pjvViewTanHalfFov() / passTargetRes.y;

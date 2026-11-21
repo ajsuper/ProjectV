@@ -167,7 +167,7 @@ vec3 mtnFarDetail(vec3 n, vec2 xz, float texel, float pixel, out float tone) {
     vec2 q = vec2(dot(xz, across), dot(xz, down) / 3.0);
     vec2 grad = vec2(0.0, 0.0);
     float wavelength = texel * 1.2;
-    float amp = 1.1 * (0.35 + 0.65 * smoothstep(0.1, 0.8, steep));
+    float amp = 1.5 * (0.35 + 0.65 * smoothstep(0.1, 0.8, steep));
     tone = 0.0;
     for (int i = 0; i < 8; i++) {
         float fade = smoothstep(1.5 * pixel, 3.0 * pixel, wavelength);
@@ -179,9 +179,34 @@ vec3 mtnFarDetail(vec3 n, vec2 xz, float texel, float pixel, out float tone) {
         wavelength *= 0.5;
         amp *= 0.7;
     }
+    // And a grain to the colour, finer than the colour atlas, not stretched: the specks of trees, rock and
+    // bare ground a far slope is made of. Down to a pixel; TAA averages what is below.
+    float speck = 0.0;
+    float w2 = texel * 0.6;
+    float a2 = 1.0;
+    for (int i = 0; i < 6; i++) {
+        float fade = smoothstep(1.0 * pixel, 2.0 * pixel, w2);
+        if (fade <= 0.0) break;
+        speck += mtnNoised(xz / w2 + vec2(31.7 + float(i) * 5.1, 7.3)).x * a2 * fade;
+        w2 *= 0.5;
+        a2 *= 0.8;
+    }
+    tone += 0.8 * speck;
     // Back to world x, z (q = (along across, along down / 3)).
     vec2 g = across * grad.x + down * (grad.y / 3.0);
     return normalize(n + vec3(-g.x, 0.0, -g.y) * n.y);
+}
+
+// The far field's look at xz on ring f: its normal with detail, and its albedo (linear) with grain.
+// Forest (a green, dark albedo) takes a darker, stronger speckle: crowns and the shade between them.
+void mtnFarSurface(int f, vec2 xz, float pixel, out vec3 normal, out vec3 albedo) {
+    float texel = mtnFarRing(f).z / float(MTN_FAR_RES);
+    float tone;
+    normal = mtnFarDetail(mtnFarNormal(f, xz), xz, texel, pixel, tone);
+    vec3 c = mtnFarColour(f, xz);
+    float forest = smoothstep(0.0, 0.06, c.g - c.r * 0.92) * (1.0 - smoothstep(0.35, 0.55, c.g));
+    float grain = 0.35 + 0.35 * forest;
+    albedo = pjvSrgbToLinear(c) * clamp(1.0 + grain * tone, 0.45, 1.4);
 }
 
 // Where a ray leaves the voxel rings' box (in x and z), or 0 if it starts outside it or there is none.
