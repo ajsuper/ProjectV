@@ -85,7 +85,7 @@ inline ColumnResult generateColumn(const Landform& land, const Palette& palette,
             out.height = mix(mix(at(i, j).height, at(i + 1, j).height, u), mix(at(i, j + 1).height, at(i + 1, j + 1).height, u), w);
             return true;
         };
-        collectTrees(x0, z0, x0 + c, z0 + c, land.settings().seed, groundAt, trees);
+        collectTrees(x0, z0, x0 + c, z0 + c, land.settings().seed, v <= 1.0, v <= 0.5, groundAt, trees);
     }
 
     // The top solid voxel of each column: a voxel is solid when its centre is under the ground.
@@ -105,8 +105,9 @@ inline ColumnResult generateColumn(const Landform& land, const Palette& palette,
             f.top = t;
             f.bottom = lowest - kSkirt;
             const double x = x0 + (i + 0.5) * v, z = z0 + (j + 0.5) * v;
-            SurfaceMix mixAt = surfaceMix(s, x, z, v);
-            if (stampTrees) mixAt.cover = 0.0;   // the trees are voxels here, not a tint
+            const SurfaceMix mixAt = surfaceMix(s, x, z, v);
+            // Oak is drawn from 1 m voxels in, chamisa from 0.5 m; trees from 2 m.
+            const bool shrubsDrawn = mixAt.shrub == Material::Chamisa ? v <= 0.5 : v <= 1.0;
             Material m;
             int shade;
             // Patches a few metres across up close; per-voxel dither from 2 m voxels out.
@@ -114,14 +115,14 @@ inline ColumnResult generateColumn(const Landform& land, const Palette& palette,
             // share of voxels here as the dither does in the next ring out: no line where they meet.
             const double coherent = clamp01(0.5 + 1.7 * fbm(x / 3.0, z / 3.0, 2, 101));
             pickMaterial(mixAt, hash2(ix * kChunkRes + i, iz * kChunkRes + j, uint32_t(ring) * 0x51ed27U + 9U),
-                         coherent, smoothstep(0.5, 2.0, v), m, shade);
+                         coherent, smoothstep(0.5, 2.0, v), stampTrees, shrubsDrawn, m, shade);
             f.surface = palette.at(m, shade);
             f.under = palette.at(subsurface(mixAt), std::clamp(int(mixAt.shade * kShades), 0, kShades - 1));
             // A canopy voxel where trees are not drawn stands one voxel up off the ground, when its trees
             // are tall enough for this ring: woodland keeps a silhouette and a shadow out to where a
             // voxel is taller than a fir.
             f.canopy = false;
-            if (!stampTrees && canopyHeight(m) >= 0.6 * v) {
+            if (canopyHeight(m) >= 0.6 * v) {   // only a plant not drawn as voxels comes back as its class
                 f.canopy = true;
                 f.ground = palette.at(mixAt.groundMix > 0.5 ? mixAt.groundB : mixAt.groundA, shade);
                 f.top += 1;

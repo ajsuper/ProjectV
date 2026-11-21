@@ -233,6 +233,23 @@ Ahead of M4, because the dotted juniper hills are what reads as Santa Fe. `inclu
 - Open: crowns are one green each; ponderosas read as lollipops; snags, shrubs (chamisa) and the
   canyonlands juniper and pinyon assets for the nearest ring.
 
+## M5, second pass (2026-11-21): less clean, more colour
+
+The user, on the first pass: "the shape is incredibly good"; the trees too clean and uniform, the colours
+boring.
+
+- **Crowns are lobe clusters eroded by 3D value noise** (ragged edges, gaps), each tree leaning a little,
+  sized from a skewed spread (many small, a few big), with two foliage colours in patches, its own shade
+  shift, darker inside and lighter at the top and rim. Kinds: shaggy junipers with twisted trunks, denser
+  pinyons, silver snags (3.5%), ponderosas with crowns in clumps up a cinnamon trunk (old ones
+  flat-topped), firs and spruces in drooping tiers with a spire, aspens with white trunks.
+- **Understory** on its own 3 m grid: Gambel oak thickets (drawn from 1 m voxels) and chamisa with faded
+  yellow tops (from 0.5 m); a tint beyond.
+- **October by default** (`MOUNTAINS_SEASON=november` for the bare aspens and more snow): gold aspen groves
+  kilometres across in the mixed conifer and spruce-fir, rust oak on the mid slopes (south-facing more),
+  gold grama, a first dusting of snow on the peaks. Ground: red earth patches, pale sand in the washes,
+  pink granite with orange lichen. 26 classes, 8 shades each (208 slots).
+
 ## M6, so far (2026-11-21)
 
 - `examples/55-mountains/README.md`; a row in `examples/README.md`; a run line in AGENTS.md.
