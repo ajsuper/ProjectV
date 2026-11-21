@@ -15,6 +15,7 @@
 
 #include "mountains/landform.hpp"
 #include "mountains/surface.hpp"
+#include "mountains/trees.hpp"
 #include "utils/material.h"
 #include "utils/tile_table.h"
 #include "utils/voxel_management.h"
@@ -64,12 +65,35 @@ inline ColumnResult generateColumn(const Landform& land, const Palette& palette,
     land.sampleGrid(x0 - 0.5 * v, z0 - 0.5 * v, v, n, n, v, samples);
     const auto t1 = clock::now();
 
+    // Trees, in the rings fine enough to draw them: their trunks stand on a coarser grid of the ground
+    // (aligned to the world, so neighbouring columns agree on every trunk) around the column.
+    const bool stampTrees = v <= 2.0;
+    std::vector<Tree> trees;
+    if (stampTrees) {
+        const double g = std::max(v, 1.0);
+        const double gx0 = std::floor((x0 - kTreeReach - kTreeCell) / g) * g, gz0 = std::floor((z0 - kTreeReach - kTreeCell) / g) * g;
+        const int gn = int(std::ceil((c + 2.0 * (kTreeReach + kTreeCell)) / g)) + 2;
+        std::vector<Sample> coarse;
+        land.sampleGrid(gx0, gz0, g, gn, gn, g, coarse);
+        auto groundAt = [&](double x, double z, Sample& out) {
+            const double fi = (x - gx0) / g, fj = (z - gz0) / g;
+            const int i = int(std::floor(fi)), j = int(std::floor(fj));
+            if (i < 0 || j < 0 || i >= gn - 1 || j >= gn - 1) return false;
+            const double u = fi - i, w = fj - j;
+            auto at = [&](int a, int b) -> const Sample& { return coarse[size_t(b) * size_t(gn) + size_t(a)]; };
+            out = at(int(std::lround(fi)), int(std::lround(fj)));
+            out.height = mix(mix(at(i, j).height, at(i + 1, j).height, u), mix(at(i, j + 1).height, at(i + 1, j + 1).height, u), w);
+            return true;
+        };
+        collectTrees(x0, z0, x0 + c, z0 + c, land.settings().seed, groundAt, trees);
+    }
+
     // The top solid voxel of each column: a voxel is solid when its centre is under the ground.
     std::vector<int64_t> top(size_t(n) * size_t(n));
     for (size_t i = 0; i < top.size(); ++i) top[i] = int64_t(std::floor(samples[i].height / v - 0.5));
     auto topAt = [&](int i, int j) { return top[size_t(j) * size_t(n) + size_t(i)]; };
 
-    struct ColumnFill { int64_t top, bottom; uint8_t surface, under; };
+    struct ColumnFill { int64_t top, bottom; uint8_t surface, under; bool canopy; uint8_t ground; };
     std::vector<ColumnFill> fills(size_t(kChunkRes) * size_t(kChunkRes));
     int64_t lo = INT64_MAX, hi = INT64_MIN;
     for (int j = 0; j < kChunkRes; ++j) {
@@ -81,7 +105,8 @@ inline ColumnResult generateColumn(const Landform& land, const Palette& palette,
             f.top = t;
             f.bottom = lowest - kSkirt;
             const double x = x0 + (i + 0.5) * v, z = z0 + (j + 0.5) * v;
-            const SurfaceMix mixAt = surfaceMix(s, x, z, v);
+            SurfaceMix mixAt = surfaceMix(s, x, z, v);
+            if (stampTrees) mixAt.cover = 0.0;   // the trees are voxels here, not a tint
             Material m;
             int shade;
             // Patches a few metres across up close; per-voxel dither from 2 m voxels out.
@@ -92,9 +117,34 @@ inline ColumnResult generateColumn(const Landform& land, const Palette& palette,
                          coherent, smoothstep(0.5, 2.0, v), m, shade);
             f.surface = palette.at(m, shade);
             f.under = palette.at(subsurface(mixAt), std::clamp(int(mixAt.shade * kShades), 0, kShades - 1));
+            // A canopy voxel where trees are not drawn stands one voxel up off the ground, when its trees
+            // are tall enough for this ring: woodland keeps a silhouette and a shadow out to where a
+            // voxel is taller than a fir.
+            f.canopy = false;
+            if (!stampTrees && canopyHeight(m) >= 0.6 * v) {
+                f.canopy = true;
+                f.ground = palette.at(mixAt.groundMix > 0.5 ? mixAt.groundB : mixAt.groundA, shade);
+                f.top += 1;
+            }
             lo = std::min(lo, f.bottom);
             hi = std::max(hi, f.top);
         }
+    }
+
+    // The trees' voxels, in this column only.
+    struct TreeVoxel { int i, j; int64_t y; uint8_t slot; };
+    std::vector<TreeVoxel> treeVoxels;
+    if (!trees.empty()) {
+        const double lo3[3] = {x0, -1e9, z0}, hi3[3] = {x0 + c, 1e9, z0 + c};
+        const int64_t bx = ix * kChunkRes, bz = iz * kChunkRes;
+        for (const Tree& t : trees)
+            stampTree(t, v, lo3, hi3, [&](int64_t vx, int64_t vy, int64_t vz, Material m, int shade) {
+                const int i = int(vx - bx), j = int(vz - bz);
+                if (i < 0 || j < 0 || i >= kChunkRes || j >= kChunkRes) return;
+                treeVoxels.push_back({i, j, vy, palette.at(m, shade)});
+                lo = std::min(lo, vy);
+                hi = std::max(hi, vy);
+            });
     }
 
     // One chunk per vertical cell the column touches.
@@ -108,9 +158,15 @@ inline ColumnResult generateColumn(const Landform& land, const Palette& palette,
                 const ColumnFill& f = fills[size_t(j) * kChunkRes + size_t(i)];
                 const int64_t y0 = std::max(f.bottom, base), y1 = std::min(f.top, base + kChunkRes - 1);
                 for (int64_t y = y0; y <= y1; ++y) {
-                    projv::utils::brickMapSetVoxel(*map, i, int(y - base), j, y == f.top ? f.surface : f.under);
+                    const uint8_t slot = y == f.top ? f.surface : (f.canopy && y == f.top - 1 ? f.ground : f.under);
+                    projv::utils::brickMapSetVoxel(*map, i, int(y - base), j, slot);
                     any = true;
                 }
+            }
+        for (const TreeVoxel& tv : treeVoxels)
+            if (tv.y >= base && tv.y < base + kChunkRes) {
+                projv::utils::brickMapSetVoxel(*map, tv.i, int(tv.y - base), tv.j, tv.slot);
+                any = true;
             }
         if (!any) continue;
         projv::ChunkHeader hdr;

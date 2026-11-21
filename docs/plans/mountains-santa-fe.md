@@ -1,6 +1,6 @@
 # Mountains: the Sangre de Cristo at Santa Fe
 
-Status: **approved**, 2026-11-21. **M1, M2, M3 built** (awaiting the user's look); M4 next. A new example, `examples/55-mountains` (target
+Status: **approved**, 2026-11-21. **M1, M2, M3 built, M5 first pass** (awaiting the user's look); M4 next. A new example, `examples/55-mountains` (target
 `mountains`), that generates mountains in the style of those around Santa Fe and draws them with a fast
 renderer of its own: voxels all the way to a horizon about 100 km out, detailed underfoot. It leaves
 `50-terrain-generator` (canyonlands, alpine) as it is.
@@ -212,6 +212,26 @@ from the gallery's `fast`; `MOUNTAINS_RENDERER=basic` keeps the engine's basic r
   compiled (CMake 3.26+), so a fresh build ran with no `.bin`; it now waits for the shader target.
 - Open: the horizon toward a low sun goes a little yellow (single scattering, no real multiple
   scattering); the renderer's speed on a discrete GPU.
+
+## M5, first pass (2026-11-21)
+
+Ahead of M4, because the dotted juniper hills are what reads as Santa Fe. `include/mountains/trees.hpp`.
+
+- **Procedural trees, not assets yet** (D10 named the tree brush's assets for the nearest rings; shapes
+  first, to judge density and scale): round bushy junipers and pinyons (2.5-6 m), ponderosas (bare orange
+  trunk, oval crown, 14-24 m), firs and spruces (tiered cones, snow-dusted above the snowline), bare
+  aspens. Stamped as voxels in rings 0-3 (voxels 2 m and finer).
+- **Placement** is a jittered 6 m grid by world position, a cell's tree kept with the probability that
+  makes the crowns cover what the canopy cover says; species from the elevation band (and aspect) at the
+  trunk. Trunks stand on a 1 m grid of the ground aligned to the world, so neighbouring columns and rings
+  agree on every tree.
+- **Past ring 3**, a canopy voxel stands one voxel up off the ground where its trees are at least 0.6 of a
+  voxel tall, so woodland keeps a silhouette and shadow (PJ to the 4 m ring, forest to the 16 m ring) and
+  the hand-off from drawn trees shows no edge. As a flat tint it did: drawn trees hide the ground at a
+  grazing angle, a tint does not.
+- PJ cover 18% (was 25%). Generation: 7.5 s for everything (fill ~26-51 ms a column in rings 0-3).
+- Open: crowns are one green each; ponderosas read as lollipops; snags, shrubs (chamisa) and the
+  canyonlands juniper and pinyon assets for the nearest ring.
 
 ## Open questions
 

@@ -9,10 +9,10 @@ namespace mountains {
 
 enum class Material : uint8_t {
     Soil, Grama, Sediment, Pinyon, Ponderosa, Fir, Spruce, AspenBare, Tundra,
-    Granite, Gneiss, Basalt, Snow, Water, Count
+    Granite, Gneiss, Basalt, Snow, Water, Bark, Count
 };
 constexpr int kMaterialCount = int(Material::Count);
-constexpr int kShades = 16;   // per material: 14 x 16 = 224 palette slots of the 255
+constexpr int kShades = 16;   // per material: 15 x 16 = 240 palette slots of the 255
 
 struct Rgb { double r = 0, g = 0, b = 0; };
 inline Rgb operator*(Rgb a, double k) { return {a.r * k, a.g * k, a.b * k}; }
@@ -36,6 +36,7 @@ inline Rgb materialColour(Material m) {
         case Material::Basalt: return {0.26, 0.24, 0.23};
         case Material::Snow: return {0.93, 0.95, 0.99};
         case Material::Water: return {0.22, 0.32, 0.40};
+        case Material::Bark: return {0.40, 0.27, 0.19};
         default: return {1, 0, 1};
     }
 }
@@ -84,11 +85,11 @@ inline SurfaceMix surfaceMix(const Sample& s, double x, double z, double footpri
     // Trees.
     double cover = 0.0;
     if (e < 2300.0) {
-        cover = 0.25 * smoothstep(1880.0, 2000.0, e);
+        cover = 0.18 * smoothstep(1880.0, 2000.0, e);
         m.treeA = m.treeB = Material::Pinyon;
     } else if (e < 2600.0) {
         const double t = smoothstep(2300.0, 2600.0, e);
-        cover = mix(0.25, 0.5, t);
+        cover = mix(0.18, 0.5, t);
         m.treeA = Material::Pinyon; m.treeB = Material::Ponderosa; m.treeMix = t;
     } else if (e < 3000.0) {
         cover = mix(0.5, 0.75, smoothstep(2600.0, 3000.0, e));
@@ -127,6 +128,19 @@ inline SurfaceMix surfaceMix(const Sample& s, double x, double z, double footpri
     m.water = std::max(s.river, s.cirque > 0.9 ? 0.8 : 0.0);
     m.shade = clamp01(0.5 + 0.8 * fbm(x / 60.0, z / 60.0, 2, 99));
     return m;
+}
+
+// How tall the trees of a canopy class stand, m: in rings too coarse to draw trees, a canopy voxel
+// stands up off the ground when its trees are at least ~0.6 of a voxel tall.
+inline double canopyHeight(Material m) {
+    switch (m) {
+        case Material::Pinyon: return 4.0;
+        case Material::Ponderosa: return 19.0;
+        case Material::Fir: return 18.0;
+        case Material::Spruce: return 21.0;
+        case Material::AspenBare: return 13.0;
+        default: return 0.0;
+    }
 }
 
 // The blended colour (the lab).

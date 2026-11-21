@@ -384,7 +384,7 @@ int installResults(Clipmap& cm, projv::Scene& scene, Pool& pool, double budgetMs
 Palette internPalette(projv::Scene& scene, projv::ComponentRecord& comp) {
     Palette p;
     static const char* names[] = {"soil", "grama", "sediment", "pinyon", "ponderosa", "fir", "spruce", "aspen",
-                                  "tundra", "granite", "gneiss", "basalt", "snow", "water"};
+                                  "tundra", "granite", "gneiss", "basalt", "snow", "water", "bark"};
     for (int m = 0; m < kMaterialCount; ++m)
         for (int s = 0; s < kShades; ++s) {
             const Rgb c = shadeColour(Material(m), s);
