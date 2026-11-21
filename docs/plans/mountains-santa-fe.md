@@ -1,6 +1,6 @@
 # Mountains: the Sangre de Cristo at Santa Fe
 
-Status: **approved**, 2026-11-21. **M1, M2, M3 built, M5 first pass** (awaiting the user's look); M4 next. A new example, `examples/55-mountains` (target
+Status: **approved**, 2026-11-21. **M1-M3 built, M5 two passes, M7 built** (D2 revised: a smooth far field); M4 (the local scale) next. A new example, `examples/55-mountains` (target
 `mountains`), that generates mountains in the style of those around Santa Fe and draws them with a fast
 renderer of its own: voxels all the way to a horizon about 100 km out, detailed underfoot. It leaves
 `50-terrain-generator` (canyonlands, alpine) as it is.
@@ -249,6 +249,45 @@ boring.
   kilometres across in the mixed conifer and spruce-fir, rust oak on the mid slopes (south-facing more),
   gold grama, a first dusting of snow on the peaks. Ground: red earth patches, pale sand in the washes,
   pink granite with orange lichen. 26 classes, 8 shades each (208 slots).
+
+## D2 revised (2026-11-21): voxels near, a smooth heightfield far
+
+The user, on the renderer: distant voxels should not be visible; screen-space normal smoothing over the
+far rings looked low-quality at distance (on a gentle slope one voxel step spans more than the kernel, so
+contour bands stay). Agreed instead: **voxels to ~2 km, a smooth surface beyond.**
+
+| # | Decision | Why |
+|---|---|---|
+| D14 | **Voxel rings 0-4** (0.25-4 m voxels, ~2 km); **far rings 5-10 are heightfields**, same clipmap and columns, no voxels | Voxels where they read as voxels and carry the detail (trees to 1 km, canopy bumps to 2 km); beyond, a voxel is a few pixels and only its edges show |
+| D15 | **Raymarched, not rasterized**: each far column writes a 64 x 64 tile of height (R32F) and colour (RGBA8) into a per-ring atlas, by column modulo the ring's span (toroidal), uploaded as a sub-rectangle; a small state texture says which column each slot holds. The G-buffer pass marches the heightfield (bilinear heights, normals from them) after the voxel march misses, from where the ray leaves the voxel rings' box | The engine's renderers are fullscreen passes: a mesh pass with a depth buffer is an engine change. A heightfield march fits the pass as it is, reads as a smooth mesh, and shadows and aerial perspective come free |
+| D16 | Far colour is the surface mix blended, not dithered; forests raise the far surface by their canopy | No speckle; forests keep a silhouette and a shadow to the horizon |
+| D17 | Far hits are written as non-voxel (gFace.w = 0), so the reconstruction upsamples them bilinearly | A smooth surface has no voxel faces to rebuild |
+
+Milestone **M7**: the far field; the voxel rings cut to five; the hand-off measured and judged. The
+screen-space normal smoothing (normal_smooth) stays for the outer voxel rings near the hand-off only.
+
+## M7 as built (2026-11-21): the far field
+
+- `include/mountains/columns.hpp` `generateFarColumn`, `renderer/include/mountains_far.sc`, the far rings in
+  `main.cpp`. Five voxel rings (`MOUNTAINS_VOXEL_RINGS`), six heightfield rings: 1,620 chunks and 34 MB of
+  voxels (was 3,288, 78 MB); far columns cost ~35 ms each, no tile tables.
+- The atlases: heights R32F and colours RGBA8, 3072 x 2048 (six 1024^2 ring squares), and a 96 x 16 state
+  texture; a column's tile goes up as a sub-rectangle when it installs.
+- The march: bilinear heights, the ring chosen by distance from the camera, one state lookup per column a
+  sample's four texels fall in, steps of `max(0.7 texel, 0.0012 t, 0.45 * height above)`, the crossing
+  found by halving. **The depth pre-pass marches it too**, so a far ray starts just short of its hit.
+  Shadows: the voxels, then the far field (40 km).
+- **Detail finer than the heightfield** (the user: distant mountains too smooth): octaves of gradient noise
+  in the normal, from just under a texel to a pixel and a half, stretched three times down the slope (reads
+  as gullies and ribs), strongest on steep ground, with a matching tone in the albedo.
+- Far colour takes 1.7x the canopy cover, darkened, for how a forest hides its ground seen from the side.
+- The screen-space normal and albedo smoothing (`normal_smooth`) now only touches voxels under 3.5 render
+  texels (the user: it started too close); far hits pass through it.
+- Cost on the Radeon 860M, ~1 MP: GPU ~21 ms (G-buffer 13-14, pre-pass 1.5). Before the pre-pass marched the
+  far field: 19 ms G-buffer.
+- `--selftest` now flies out and back and requires the same chunks and blobs live at the end as at the
+  start (a leak test that does not depend on how wooded the ground is).
+- Open: the hand-off at ~2 km shows (voxel woodland against smooth ground); the detail's strength; speed.
 
 ## M6, so far (2026-11-21)
 

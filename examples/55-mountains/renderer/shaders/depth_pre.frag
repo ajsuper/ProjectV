@@ -13,12 +13,20 @@ $input v_texcoord0
 // a ridge still starts in front of it. A feature narrower than a pre-pass texel can slip between nine
 // rays; the rings keep voxels about three window pixels wide or more, and a pre-pass texel is eight.
 //
+// The far field is marched the same way when the voxels miss, so its long rays skip ahead too.
+//
 // Output: x the distance to the hit (1e9: nothing).
 // =============================================================================
 
 #include <bgfx_shader.sh>
 #include <pjv_scene.sc>
 #include <pjv_camera.sc>
+
+// The far field too, past the voxels: its rays are the long ones.
+SAMPLER2D(farHeight, 0);
+SAMPLER2D(farColour, 1);
+SAMPLER2D(farState, 2);
+#include <mountains_far.sc>
 
 void main() {
     vec2 res = passTargetRes.xy;
@@ -32,5 +40,11 @@ void main() {
     rq.distanceToFinishLOD = 10000u;
     PjvSceneIntersectData found = pjvRaySceneIntersect(ray, rq).hit;
     bool hit = !(found.foundBox.size < 0.0 || found.rayT <= 0.0 || dot(found.normal, found.normal) < 0.5);
-    gl_FragData[0] = vec4(hit ? found.rayT : 1e9, 0.0, 0.0, 1.0);
+    float t = hit ? found.rayT : 1e9;
+    if (!hit) {
+        float tFar;
+        int ring;
+        if (mtnFarMarch(ray.origin, ray.direction, mtnLeaveVoxels(ray.origin, ray.direction), 2.0e5, tFar, ring)) t = tFar;
+    }
+    gl_FragData[0] = vec4(t, 0.0, 0.0, 1.0);
 }

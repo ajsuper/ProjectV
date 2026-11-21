@@ -39,6 +39,8 @@ SAMPLER2D(gAlbedo, 3);
 // pass was inserted; the bilateral blur below is unchanged, it just now smooths an
 // already-denoised signal instead of raw few-ray noise.
 SAMPLER2D(aoRaw,    4);
+SAMPLER2D(gSoft,    5);   // normal_smooth.frag: the normal shading uses
+SAMPLER2D(gSoftAlbedo, 6);   // ... and the albedo
 
 uniform vec4 fastSettings;   // w: the blur on (1) or off (0), from the gallery's panel; xyz are ssao.frag's
 
@@ -64,7 +66,8 @@ void main() {
     float hitMask = direct4.a;
     vec4  pos4    = texture2D(gPos,     uv);
     vec3  N0      = texture2D(gNormal,  uv).xyz;
-    vec3  albedo  = texture2D(gAlbedo, uv).rgb;
+    vec3  soft    = texture2D(gSoft,    uv).xyz;
+    vec3  albedo  = texture2D(gSoftAlbedo, uv).rgb;
 
     // Sky / background: no AO, pass the sky colour straight through.
     if (hitMask < 0.5) {
@@ -103,7 +106,7 @@ void main() {
                 // surface one depth-step in front/behind -- which is then rejected
                 // instead of bleeding light across the voxel edge.
                 float wn = pow(max(0.0, dot(N0, Ni)), SIGMA_N);
-                float planeDist = abs(dot(Pi - P0, N0));
+                float planeDist = abs(dot(Pi - P0, N0)) / max(1.0, pos4.w * 0.004);
                 float wp = exp(-(planeDist * planeDist) / (2.0 * SIGMA_P * SIGMA_P));
                 float w  = wn * wp;
 
@@ -114,8 +117,10 @@ void main() {
         skyLight = skySum / wSum;
     }
 
-    // Diffuse response = albedo * mean(Li). Direct sun is added untouched.
-    vec3 finalColor = direct4.rgb + albedo * skyLight;
+    // Diffuse response = albedo * mean(Li), plus the sun where it gets to (gDirect.r), by the smoothed
+    // normal.
+    vec3 sunLight = (albedo / 3.14159265) * max(dot(soft, SUN_DIR), 0.0) * SUN_COLOR * direct4.r;
+    vec3 finalColor = sunLight + albedo * skyLight;
 
     // Then the air between it and the camera: what makes a ridge 60 km off read as 60 km off.
     vec3 toPoint = P0 - pjvViewPosition();

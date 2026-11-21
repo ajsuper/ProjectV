@@ -17,7 +17,7 @@ $input v_texcoord0
 //   0 gPos     xyz the hit, w its distance (-1: sky)
 //   1 gNormal  xyz the face's normal
 //   2 gAlbedo  rgb albedo
-//   3 gDirect  rgb the direct sun's light (the sky's colour on a miss), a 1 hit / 0 sky
+//   3 gDirect  r the sun's visibility (0..1) on a hit, rgb the sky's colour on a miss; a 1 hit / 0 sky
 //   4 gFace    xyz the hit face's centre, w the voxel's edge (0: sky)
 //   5 gRot     the chunk's rotation
 //   6 gMotion  xy where the hit was on screen last frame minus where it is now (uv), by the camera alone:
@@ -54,6 +54,12 @@ float skipDistance(vec2 fragCoord) {
 // The sky, the air and the sun: mountains_sky.sc.
 #include <mountains_sky.sc>
 
+// The far field (mountains_far.sc): the heightfield rings past the voxels.
+SAMPLER2D(farHeight, 1);
+SAMPLER2D(farColour, 2);
+SAMPLER2D(farState, 3);
+#include <mountains_far.sc>
+
 void main() {
     vec2 res = passTargetRes.xy;
     vec2 uv = v_texcoord0 + jitterParams.xy * passTargetRes.zw;
@@ -78,19 +84,27 @@ void main() {
     float skip = renderParams.y > 0.5 ? 0.0 : skipDistance(gl_FragCoord.xy);
     PjvRay current = ray;
     current.origin = ray.origin + ray.direction * skip;
+    // Each ray, the camera's then the shadow's, meets the voxels first and then, past them, the far field.
+    bool farHit = false;
     for (int i = 0; i < 2; i++) {
-        PjvRayQuery rq = pjvPrimaryQuery(100u);
-        // Eleven rings to cross on the way to the horizon, and a shadow from a ridge kilometres off.
-        rq.maxRaySteps = i == 0 ? 768u : 384u;
-        // Distance-LOD on the camera ray was tried (distanceToFinishLOD 64) and gave almost no speed-up
-        // while making distant geometry unrecognisably blocky. Keep it crisp.
-        rq.startLOD = 0;
-        rq.finishLOD = i == 0 ? 2u : 0u;
-        rq.distanceToFinishLOD = i == 0 ? 10000u : 30u;
-        PjvSceneIntersectData found = pjvRaySceneIntersect(current, rq).hit;
-        if (i == 0) {
+        bool voxelHit = false;
+        PjvSceneIntersectData found;
+        found.foundBox.size = -1.0;
+        found.rayT = -1.0;
+        if (!(i == 1 && farHit)) {   // a far hit's shadow is the far field's alone
+            PjvRayQuery rq = pjvPrimaryQuery(100u);
+            rq.maxRaySteps = i == 0 ? 768u : 384u;
+            // Distance-LOD on the camera ray was tried (distanceToFinishLOD 64) and gave almost no speed-up
+            // while making distant geometry unrecognisably blocky. Keep it crisp.
+            rq.startLOD = 0;
+            rq.finishLOD = i == 0 ? 2u : 0u;
+            rq.distanceToFinishLOD = i == 0 ? 10000u : 30u;
+            found = pjvRaySceneIntersect(current, rq).hit;
             // Trust the march's own hit data: re-intersecting foundBox misclassifies boundary-exact hits.
-            if (found.foundBox.size < 0.0 || found.rayT <= 0.0 || dot(found.normal, found.normal) < 0.5) break;
+            voxelHit = !(found.foundBox.size < 0.0 || found.rayT <= 0.0 || dot(found.normal, found.normal) < 0.5);
+        }
+        if (i == 1 && voxelHit) break;   // in a voxel's shadow: direct stays 0
+        if (i == 0 && voxelHit) {
             hit = true;
             distance = found.rayT + skip;
             normal = normalize(found.normal);
@@ -102,17 +116,51 @@ void main() {
             rotation = pjvHeader(int(found.headerIndex)).rotation;
             vec3 centre = found.foundBox.position + pjvRotationFromQuat(rotation) * vec3(edge * 0.5, edge * 0.5, edge * 0.5);
             face = vec4(centre + normal * (edge * 0.5), edge);
-            // The sun, through one hard shadow ray -- on its own target, so the SSAO, which only
-            // attenuates the sky's ambient, cannot darken a sunlit face.
+            // The sun, through one hard shadow ray. Only whether it gets there is stored (gDirect.r):
+            // combine_blur works out how much it lights with the smoothed normal (normal_smooth), which
+            // may face the sun where this face does not -- the riser of a step on a slope that does.
             direct = vec3(0.0, 0.0, 0.0);
-            if (dot(normal, SUN_DIR) <= 0.0) break;
-            if (renderParams.x > 0.5) { direct = (albedo / PI) * dot(normal, SUN_DIR) * SUN_COLOR; break; }
-            // Off the surface by a share of its own voxel: voxels here run from 0.25 m to 256 m.
+            float facing = dot(normal, SUN_DIR);
+            if (facing <= -0.6) break;
+            if (renderParams.x > 0.5) { direct = vec3(1.0, 0.0, 0.0); break; }
+            // Off the surface by a share of its own voxel. A face turned from the sun starts just over its
+            // voxel's top instead, so the ray clears the voxel.
             current.origin = position + normal * (edge * 0.05);
+            if (facing <= 0.05) current.origin += vec3(0.0, edge * 0.55, 0.0);
+            // Where a voxel is small on screen (its normal smoothed: normal_smooth.frag), the steps of a
+            // slope must not shadow each other either: the ray starts a voxel up and a voxel toward the sun.
+            float texelWorld = distance * 2.0 * pjvViewTanHalfFov() / res.y;
+            float small = 1.0 - smoothstep(1.5, 3.5, edge / max(texelWorld, 1e-6));   // as normal_smooth's
+            current.origin += (vec3(0.0, 1.0, 0.0) + SUN_DIR) * (edge * 1.1 * small);
             current.direction = SUN_DIR;
-        } else if (found.rayT < 0.0) {   // only a genuine miss (-1) is unoccluded
-            direct = (albedo / PI) * dot(normal, SUN_DIR) * SUN_COLOR;
+            continue;
         }
+        // The far field, from where the ray leaves the voxel rings (inside them the voxels are the ground).
+        float t0 = farHit ? 0.0 : mtnLeaveVoxels(current.origin, current.direction);
+        float tFar;
+        int ring;
+        bool far = mtnFarMarch(current.origin, current.direction, t0, i == 0 ? 2.0e5 : 4.0e4, tFar, ring);
+        if (i == 1) {
+            direct = vec3(far ? 0.0 : 1.0, 0.0, 0.0);
+            break;
+        }
+        if (!far) break;   // the sky
+        hit = true;
+        farHit = true;
+        distance = tFar + skip;
+        position = ray.origin + ray.direction * distance;
+        normal = mtnFarNormal(ring, position.xz);
+        float texelAt = mtnFarRing(ring).z / float(MTN_FAR_RES);
+        float tone;
+        normal = mtnFarDetail(normal, position.xz, texelAt, distance * 2.0 * pjvViewTanHalfFov() / (res.y * 2.0), tone);
+        albedo = pjvSrgbToLinear(mtnFarColour(ring, position.xz)) * clamp(1.0 + 0.35 * tone, 0.6, 1.3);
+        face = vec4(position, 0.0);   // not a voxel: the reconstruction upsamples it (D17)
+        direct = vec3(0.0, 0.0, 0.0);
+        if (dot(normal, SUN_DIR) <= -0.2) break;
+        if (renderParams.x > 0.5) { direct = vec3(1.0, 0.0, 0.0); break; }
+        float texel = mtnFarRing(ring).z / float(MTN_FAR_RES);
+        current.origin = position + (normal + vec3(0.0, 1.0, 0.0)) * (texel * 0.5);
+        current.direction = SUN_DIR;
     }
 
     // Motion by the camera alone: where this point was in last frame's image, minus where it is now. The

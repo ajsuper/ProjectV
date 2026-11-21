@@ -3,7 +3,11 @@
         {
             "shaderID": 7,
             "frameBufferInputIDs": [],
-            "resourceTexturesIDs": [],
+            "resourceTexturesIDs": [
+                16,
+                17,
+                18
+            ],
             "frameBufferOutputID": 6,
             "multiPass": 0
         },
@@ -11,9 +15,24 @@
             "shaderID": 1,
             "frameBufferInputIDs": [],
             "resourceTexturesIDs": [
-                13
+                13,
+                16,
+                17,
+                18
             ],
             "frameBufferOutputID": 1,
+            "multiPass": 0
+        },
+        {
+            "shaderID": 8,
+            "frameBufferInputIDs": [],
+            "resourceTexturesIDs": [
+                2,
+                3,
+                6,
+                4
+            ],
+            "frameBufferOutputID": 7,
             "multiPass": 0
         },
         {
@@ -21,7 +40,7 @@
             "frameBufferInputIDs": [],
             "resourceTexturesIDs": [
                 2,
-                3,
+                14,
                 1,
                 6
             ],
@@ -36,7 +55,9 @@
                 2,
                 3,
                 4,
-                9
+                9,
+                14,
+                15
             ],
             "frameBufferOutputID": 3,
             "multiPass": 0

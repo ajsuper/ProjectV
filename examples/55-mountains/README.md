@@ -26,9 +26,10 @@ cd build/examples/mountains && ./mountains
 | Environment | |
 |---|---|
 | `MOUNTAINS_CAMERA` | `plaza` (default), `atalaya`, `baldy`, `aerial`, or `x,z,above,yaw,pitch` (m and radians; yaw 0 is east) |
+| `MOUNTAINS_SEASON` | `october` (default: gold aspens, rust oak) or `november` (bare, more snow) |
 | `MOUNTAINS_SUN` | `azimuth,elevation`, degrees, azimuth clockwise from north (default `250,22`, late afternoon) |
 | `MOUNTAINS_SEED` | The world |
-| `MOUNTAINS_RINGS`, `MOUNTAINS_N` | How many rings (11) and how many voxels from a ring's centre to its edge (512) |
+| `MOUNTAINS_RINGS`, `MOUNTAINS_VOXEL_RINGS`, `MOUNTAINS_N` | How many rings (11), how many of them are voxels (5; the rest are heightfields), and how many voxels from a ring's centre to its edge (512) |
 | `MOUNTAINS_CAPTURE` | Save a screenshot once everything has generated, print the frame time and GPU time by pass, exit |
 | `MOUNTAINS_FLY` | Fly straight ahead at this many m/s (for whether streaming keeps up) |
 | `MOUNTAINS_RENDERER=basic` | The engine's basic renderer instead of `renderer/` |
@@ -50,8 +51,9 @@ surroundings; erosion as gullies octave by octave, each following the slope the 
 detail; cirques; the river's gorge. Erosion is chaotic, so the slope each octave follows is read from a
 lattice every caller shares: a 0.25 m ring and a 256 m ring agree on where every valley is.
 
-**The rings** (`main.cpp`, `include/mountains/columns.hpp`). Eleven, each a `SceneGrid` of 64^3 chunks,
-voxels doubling ring to ring, so a voxel is about the same few pixels wide at every distance and the cost
+**The rings** (`main.cpp`, `include/mountains/columns.hpp`). Eleven, the first five a `SceneGrid` each of 64^3
+chunks, voxels doubling ring to ring (0.25 m to 4 m, to about 2 km); past them six heightfield rings, the
+ground as a smooth surface the renderer marches, to 131 km. Voxels double ring to ring, so a voxel is about the same few pixels wide at every distance and the cost
 grows with the log of the distance. A ring moves a cell at a time with the camera; it generates the hole
 under the finer ring too, and hides it only once the finer ring has the ground there, so nothing is ever
 missing while it streams. Columns are generated on a pool of threads: the ground sampled a voxel column
@@ -64,7 +66,9 @@ voxels are 2 m or less; beyond, a canopy voxel stands up off the ground.
 **The renderer** (`renderer/`) is the gallery's [fast](../30-renderers/renderers/fast/) with the air
 added: an analytic atmosphere (air and haze, optical depth in closed form) for the sky, the ambient light
 and the aerial perspective on everything by its distance; the sun's colour from its airmass, through
-ozone; shadows and AO sized by voxel; a depth pre-pass so camera rays skip the rings in front.
+ozone; shadows and AO sized by voxel; a depth pre-pass so camera rays skip the rings in front; past the voxels,
+the far field marched as a heightfield (`include/mountains_far.sc`), with detail finer than it put back in the
+normal.
 
 ## Files
 

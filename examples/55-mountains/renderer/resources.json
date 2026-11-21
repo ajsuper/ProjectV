@@ -43,6 +43,34 @@
         {
             "name": "mtnSunAir",
             "type": "vec4"
+        },
+        {
+            "name": "mtnFar0",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnFar1",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnFar2",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnFar3",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnFar4",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnFar5",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnVoxelBox",
+            "type": "vec4"
         }
     ],
     "shaders": [
@@ -73,6 +101,10 @@
         {
             "shaderID": 7,
             "path": "./renderer/shaders/depth_pre.bin"
+        },
+        {
+            "shaderID": 8,
+            "path": "./renderer/shaders/normal_smooth.bin"
         }
     ],
     "textures": [
@@ -180,6 +212,49 @@
             "sizeMode": "relative",
             "scale": 0.125,
             "origin": "CreateNew"
+        },
+        {
+            "texID": 14,
+            "name": "gSoft",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 15,
+            "name": "gSoftAlbedo",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 16,
+            "name": "farHeight",
+            "format": "R32_FLOAT",
+            "resX": 3072,
+            "resY": 2048,
+            "sizeMode": "fixed",
+            "origin": "CPUBuffer"
+        },
+        {
+            "texID": 17,
+            "name": "farColour",
+            "format": "RGBA8",
+            "resX": 3072,
+            "resY": 2048,
+            "sizeMode": "fixed",
+            "origin": "CPUBuffer"
+        },
+        {
+            "texID": 18,
+            "name": "farState",
+            "format": "RGBA8",
+            "resX": 96,
+            "resY": 16,
+            "sizeMode": "fixed",
+            "origin": "CPUBuffer"
         }
     ],
     "framebuffers": [
@@ -223,6 +298,13 @@
             "fboID": 6,
             "textureIDs": [
                 13
+            ]
+        },
+        {
+            "fboID": 7,
+            "textureIDs": [
+                14,
+                15
             ]
         }
     ]

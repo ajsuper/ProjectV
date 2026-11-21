@@ -16,7 +16,7 @@
 //
 //   ./mountains                    fly from the Plaza
 //   ./mountains --bench            headless: generate every ring around the camera, report, exit
-//   ./mountains --selftest         headless: generate, fly 5 km, check for holes, stray cells and leaks
+//   ./mountains --selftest         headless: generate, fly 5 km and back, check for holes, stray cells and leaks
 //
 //   MOUNTAINS_SEED, MOUNTAINS_RINGS (11), MOUNTAINS_N (voxels from the centre to a ring's edge: 512)
 //   MOUNTAINS_CAMERA=plaza|atalaya|baldy|aerial, or "x,z,above,yaw,pitch" (m, radians; yaw 0 = east)
@@ -91,7 +91,8 @@ struct Job {
 
 class Pool {
 public:
-    Pool(const Landform& land, const Palette& palette, unsigned threads) : land_(land), palette_(palette) {
+    Pool(const Landform& land, const Palette& palette, unsigned threads, int firstFar)
+        : land_(land), palette_(palette), firstFar_(firstFar) {
         for (unsigned t = 0; t < threads; ++t) threads_.emplace_back([this] { run(); });
     }
     ~Pool() {
@@ -137,13 +138,15 @@ private:
                 jobs_.pop();
             }
             if (job.cancelled && job.cancelled->load()) continue;
-            ColumnResult r = generateColumn(land_, palette_, job.ring, job.ix, job.iz);
+            ColumnResult r = job.ring >= firstFar_ ? generateFarColumn(land_, job.ring, job.ix, job.iz)
+                                                   : generateColumn(land_, palette_, job.ring, job.ix, job.iz);
             std::lock_guard<std::mutex> lock(mutex_);
             results_.push_back(std::move(r));
         }
     }
     const Landform& land_;
     const Palette& palette_;
+    int firstFar_ = 1 << 30;
     std::vector<std::thread> threads_;
     std::mutex mutex_;
     std::condition_variable cv_;
@@ -179,10 +182,49 @@ struct Ring {
     int generated = 0;
 };
 
+// The far rings' tiles on their way to the renderer (plan D15): each far ring has a square of the
+// height and colour atlases, a column's 64 x 64 tile at (column mod span) in it, and a slot in the state
+// texture saying which column a tile holds (the low bytes of its ix, iz; b = 255 once it holds one).
+struct FarField {
+    static constexpr int kAtlasCols = 3, kAtlasRows = 2;   // ring squares across and down: six far rings
+    int width = 0, height = 0;                             // the atlases, texels
+    int stateWidth = 0, stateHeight = 0;
+    std::vector<uint8_t> state;
+    bool stateDirty = true;
+    struct Upload { int x, y; std::vector<float> heights; std::vector<uint32_t> colours; };
+    std::deque<Upload> uploads;
+    bool upload = false;   // a renderer will take them (not in --bench, --selftest)
+};
+
 struct Clipmap {
     int rings = 11;
+    int voxelRings = 5;   // rings [0, voxelRings) are voxels; the rest heightfields (D14)
     int64_t radius = 8;   // cells from the centre to the edge (N / 64)
     std::vector<Ring> ring;
+    FarField far;
+
+    bool isFar(int k) const { return k >= voxelRings; }
+    // The state texel and the atlas texel of a far ring's column.
+    void farSlot(int k, int64_t ix, int64_t iz, int& sx, int& sz, int& ax, int& az) const {
+        const int f = k - voxelRings;
+        const int64_t span = 2 * radius;
+        sx = int(((ix % span) + span) % span);
+        sz = int(((iz % span) + span) % span);
+        ax = (f % FarField::kAtlasCols) * int(span) * kChunkRes + sx * kChunkRes;
+        az = (f / FarField::kAtlasCols) * int(span) * kChunkRes + sz * kChunkRes;
+        sx += f * int(span);
+    }
+    void setFarState(int k, int64_t ix, int64_t iz, bool held) {
+        int sx, sz, ax, az;
+        farSlot(k, ix, iz, sx, sz, ax, az);
+        uint8_t* p = &far.state[(size_t(sz) * size_t(far.stateWidth) + size_t(sx)) * 4];
+        if (held) {
+            p[0] = uint8_t(ix & 255); p[1] = uint8_t(iz & 255); p[2] = 255; p[3] = 255;
+        } else if (p[0] == uint8_t(ix & 255) && p[1] == uint8_t(iz & 255)) {
+            p[2] = 0;   // only if it still holds this column, not the one that took its slot
+        }
+        far.stateDirty = true;
+    }
 
     int64_t span() const { return 2 * radius; }
     bool inExtent(const Ring& r, int64_t ix, int64_t iz) const {
@@ -255,6 +297,7 @@ void dropRing(Clipmap& cm, projv::Scene& scene, int k) {
     for (auto& [key, col] : r.columns) {
         col.cancelled->store(true);
         for (auto& [iy, h] : col.chunks) releaseChunk(scene, h);
+        if (cm.isFar(k) && col.done) cm.setFarState(k, col.ix, col.iz, false);
     }
     r.columns.clear();
     r.pending = 0;
@@ -289,6 +332,7 @@ void placeRings(Clipmap& cm, projv::Scene& scene, Pool* pool, double camX, doubl
             col.cancelled->store(true);
             if (!col.done) --r.pending;
             for (auto& [iy, h] : col.chunks) releaseChunk(scene, h);
+            if (cm.isFar(k) && col.done) cm.setFarState(k, col.ix, col.iz, false);
             it = r.columns.erase(it);
         }
     }
@@ -324,6 +368,7 @@ void placeRings(Clipmap& cm, projv::Scene& scene, Pool* pool, double camX, doubl
 // Rebuilds a ring's SceneGrid: its extent, the vertical span of what it holds, and which cells show.
 void rebuildGrid(Clipmap& cm, projv::Scene& scene, int k) {
     Ring& r = cm.ring[size_t(k)];
+    if (r.gridIndex < 0) { r.dirty = false; return; }   // a far ring: no grid
     projv::SceneGrid& g = scene.grids[size_t(r.gridIndex)];
     const double c = cellSize(k);
     int64_t y0 = INT64_MAX, y1 = INT64_MIN;
@@ -365,6 +410,13 @@ int installResults(Clipmap& cm, projv::Scene& scene, Pool& pool, double budgetMs
             auto it = r.columns.find(columnKey(res.ix, res.iz));
             if (it == r.columns.end() || it->second.done) continue;   // dropped while it was generating
             Column& col = it->second;
+            if (cm.isFar(res.ring)) {
+                int sx, sz, ax, az;
+                cm.farSlot(res.ring, res.ix, res.iz, sx, sz, ax, az);
+                if (cm.far.upload)
+                    cm.far.uploads.push_back({ax, az, std::move(res.farHeights), std::move(res.farColours)});
+                cm.setFarState(res.ring, res.ix, res.iz, true);
+            }
             for (ColumnChunk& cc : res.chunks) {
                 const int64_t iy = cc.iy;
                 col.chunks.emplace_back(iy, installChunk(scene, r, res.ix, res.iz, std::move(cc)));
@@ -453,12 +505,27 @@ struct State {
 
 void setUpRings(State& st, projv::Scene& scene) {
     Clipmap& cm = st.clipmap;
-    cm.rings = std::clamp(envInt("MOUNTAINS_RINGS", 11), 1, 14);
+    cm.voxelRings = std::clamp(envInt("MOUNTAINS_VOXEL_RINGS", 5), 1, 14);
+    cm.rings = std::clamp(envInt("MOUNTAINS_RINGS", 11), cm.voxelRings, cm.voxelRings + FarField::kAtlasCols * FarField::kAtlasRows);
     cm.radius = std::max<int64_t>(2, (envInt("MOUNTAINS_N", 512) / kChunkRes) & ~int64_t(1));
+    if (cm.rings > cm.voxelRings && cm.radius != 8) {
+        projv::core::warn("[MOUNTAINS] the far field's atlases are sized for MOUNTAINS_N=512; using it");
+        cm.radius = 8;
+    }
+    {
+        FarField& f = cm.far;
+        const int square = int(cm.span()) * kChunkRes;
+        f.width = FarField::kAtlasCols * square;
+        f.height = FarField::kAtlasRows * square;
+        f.stateWidth = int(cm.span()) * FarField::kAtlasCols * FarField::kAtlasRows;
+        f.stateHeight = int(cm.span());
+        f.state.assign(size_t(f.stateWidth) * size_t(f.stateHeight) * 4, 0);
+    }
     cm.ring.resize(size_t(cm.rings));
     for (int k = 0; k < cm.rings; ++k) {
         Ring& r = cm.ring[size_t(k)];
         r.k = k;
+        if (cm.isFar(k)) continue;   // a heightfield: no grid, no component
         r.gridIndex = int32_t(scene.grids.size());
         projv::SceneGrid g;
         g.cellSize = float(cellSize(k));
@@ -555,6 +622,26 @@ std::shared_ptr<projv::ConstructedRenderer> buildRenderer(projv::graphics::Rende
     return renderer;
 }
 
+// Sends the far columns finished since last frame to the atlases, a tile at a time, and the state
+// texture when it changed (texture ids in renderer/resources.json).
+constexpr uint32_t kFarHeightTexture = 16, kFarColourTexture = 17, kFarStateTexture = 18;
+void uploadFarField(State& st) {
+    FarField& f = st.clipmap.far;
+    if (!st.renderer) return;
+    auto& handles = st.renderer->resources.textures.textureHandles;
+    const bgfx::TextureHandle heights = handles[kFarHeightTexture], colours = handles[kFarColourTexture];
+    for (FarField::Upload& u : f.uploads) {
+        const uint32_t bytes = uint32_t(kChunkRes * kChunkRes * 4);
+        bgfx::updateTexture2D(heights, 0, 0, uint16_t(u.x), uint16_t(u.y), kChunkRes, kChunkRes, bgfx::copy(u.heights.data(), bytes));
+        bgfx::updateTexture2D(colours, 0, 0, uint16_t(u.x), uint16_t(u.y), kChunkRes, kChunkRes, bgfx::copy(u.colours.data(), bytes));
+    }
+    f.uploads.clear();
+    if (f.stateDirty) {
+        projv::graphics::setTextureToData(st.renderer, kFarStateTexture, f.state.data(), uint32_t(f.stateWidth), uint32_t(f.stateHeight));
+        f.stateDirty = false;
+    }
+}
+
 void render(projv::Application& app) {
     State& st = app.world.ctx().get<State>();
     if (!st.renderer) return;
@@ -562,6 +649,7 @@ void render(projv::Application& app) {
     auto& scene = app.world.ctx().get<projv::Scene>();
     auto& gpu = app.world.ctx().get<projv::GPUData>();
     projv::graphics::flushSceneUpdates(scene, gpu);
+    uploadFarField(st);
     const projv::CameraView& view = app.world.ctx().get<projv::CameraView>();
     projv::graphics::setCamera(*st.renderer, view);
     const bool moved = view.position != st.lastView.position || view.forward != st.lastView.forward;
@@ -600,6 +688,29 @@ void render(projv::Application& app) {
     projv::graphics::setUniformToValue(r, "fastTemporal", temporal);
     projv::graphics::setUniformToValue(r, "mtnSun", mtnSun);
     projv::graphics::setUniformToValue(r, "mtnAtmos", atmos);
+    // The far rings (D15): where each one is, and the box the voxel rings cover, where the heightfield
+    // is not marched.
+    const Clipmap& cm = st.clipmap;
+    for (int f = 0; f < FarField::kAtlasCols * FarField::kAtlasRows; ++f) {
+        projv::core::vec4 ringInfo(0.0f);
+        const int k = cm.voxelRings + f;
+        if (k < cm.rings && cm.ring[size_t(k)].placed) {
+            const Ring& fr = cm.ring[size_t(k)];
+            const double c = cellSize(k);
+            ringInfo = projv::core::vec4(float(double(fr.ox) * c), float(double(fr.oz) * c), float(c), 1.0f);
+        }
+        projv::graphics::setUniformToValue(r, "mtnFar" + std::to_string(f), ringInfo);
+    }
+    projv::core::vec4 voxelBox(1.0f, 1.0f, -1.0f, -1.0f);   // empty
+    for (int k = cm.voxelRings - 1; k >= 0; --k)
+        if (cm.ring[size_t(k)].placed) {
+            const Ring& vr = cm.ring[size_t(k)];
+            const double c = cellSize(k), span = double(cm.span());
+            voxelBox = projv::core::vec4(float(double(vr.ox) * c), float(double(vr.oz) * c),
+                                         float((double(vr.ox) + span) * c), float((double(vr.oz) + span) * c));
+            break;
+        }
+    projv::graphics::setUniformToValue(r, "mtnVoxelBox", voxelBox);
     const vec3 air = sunIrradianceAt(st, st.camera.y + 6000.0);
     projv::core::vec4 mtnSunAir(air.x, air.y, air.z, 0.0f);
     projv::graphics::setUniformToValue(r, "mtnSunAir", mtnSunAir);
@@ -648,7 +759,7 @@ void startup(projv::Application& app) {
     st.cameraAbove = std::max(0.0, st.camera.y - st.land->height(st.camera.x, st.camera.z, 8.0));
     // MOUNTAINS_SUN="azimuth,elevation" in degrees (azimuth clockwise from north).
     if (const char* sun = std::getenv("MOUNTAINS_SUN")) std::sscanf(sun, "%f,%f", &st.sunAzimuth, &st.sunElevation);
-    st.pool = std::make_unique<Pool>(*st.land, st.palette, std::max(2u, std::thread::hardware_concurrency() - 2));
+    st.pool = std::make_unique<Pool>(*st.land, st.palette, std::max(2u, std::thread::hardware_concurrency() - 2), st.clipmap.voxelRings);
     placeRings(st.clipmap, scene, st.pool.get(), st.camera.x, st.camera.z, st.cameraAbove);
     projv::core::info("[MOUNTAINS] {} rings of {} cells, {} workers; the outer ring reaches {:.0f} km",
                       st.clipmap.rings, st.clipmap.span(), st.pool->threads(),
@@ -658,6 +769,7 @@ void startup(projv::Application& app) {
     const char* which = std::getenv("MOUNTAINS_RENDERER");
     if (!which || std::string(which) != "basic") {
         st.renderer = buildRenderer(ri);
+        st.clipmap.far.upload = true;
         app.world.ctx().emplace<projv::CameraView>();
         app.world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
         if (const char* cap = std::getenv("MOUNTAINS_CAPTURE")) st.capturePath = cap;
@@ -798,7 +910,7 @@ int bench() {
     placeCamera(st.camera, *st.land);
     st.cameraAbove = std::max(0.0, st.camera.y - st.land->height(st.camera.x, st.camera.z, 8.0));
     const unsigned threads = std::max(2u, std::thread::hardware_concurrency());
-    st.pool = std::make_unique<Pool>(*st.land, st.palette, threads);
+    st.pool = std::make_unique<Pool>(*st.land, st.palette, threads, st.clipmap.voxelRings);
     const auto t0 = Clock::now();
     placeRings(st.clipmap, scene, st.pool.get(), st.camera.x, st.camera.z, st.cameraAbove);
     for (;;) {
@@ -833,8 +945,8 @@ int bench() {
 
 // ---- Headless: check the clipmap ------------------------------------------------------------------
 //
-// Generates every ring around the Plaza, then flies 5 km east in 250 m steps, letting everything
-// generate at each. Checks, every step: every column the rings hold produced ground (no holes); every
+// Generates every ring around the Plaza, then flies 5 km east in 250 m steps and back, letting
+// everything generate at each. Checks, every step: every column the rings hold produced ground (no holes); every
 // grid cell names a live chunk of its own ring; and the scene's rows and blobs stay bounded (columns
 // dropped behind are freed and their rows reused, not leaked). Exit code 0 on success.
 int selftest() {
@@ -848,7 +960,7 @@ int selftest() {
     st.camera.z = 0.0;
     st.camera.y = st.land->height(0.0, 0.0, 0.25) + 1.7;
     st.cameraAbove = 1.7;
-    st.pool = std::make_unique<Pool>(*st.land, st.palette, std::max(2u, std::thread::hardware_concurrency()));
+    st.pool = std::make_unique<Pool>(*st.land, st.palette, std::max(2u, std::thread::hardware_concurrency()), st.clipmap.voxelRings);
     int failures = 0;
     auto fail = [&](const std::string& what) {
         if (failures < 20) std::printf("FAIL: %s\n", what.c_str());
@@ -856,8 +968,10 @@ int selftest() {
     };
     size_t firstRows = 0, firstBlobs = 0;
     const auto t0 = Clock::now();
-    for (int step = 0; step <= 20; ++step) {
-        st.camera.x = 250.0 * step;
+    // Out 5 km and back: back at the start, the same columns are held, so the same chunks and blobs must
+    // be live as at the first step -- more would be a leak.
+    for (int step = 0; step <= 21; ++step) {
+        st.camera.x = step == 21 ? 0.0 : 250.0 * step;
         st.camera.y = st.land->height(st.camera.x, 0.0, 0.25) + 1.7;
         placeRings(st.clipmap, scene, st.pool.get(), st.camera.x, st.camera.z, st.cameraAbove);
         for (;;) {
@@ -876,11 +990,12 @@ int selftest() {
                 fail("ring " + std::to_string(r.k) + " holds " + std::to_string(r.columns.size()) + " columns");
             for (const auto& [key, col] : r.columns) {
                 if (!col.done) fail("ring " + std::to_string(r.k) + ": a column never finished");
-                else if (col.chunks.empty())
+                else if (col.chunks.empty() && !st.clipmap.isFar(r.k))
                     fail("ring " + std::to_string(r.k) + ": column " + std::to_string(col.ix) + "," + std::to_string(col.iz) + " has no ground");
                 for (const auto& [iy, h] : col.chunks)
                     if (h >= scene.chunks.size() || !scene.chunks[h].alive) fail("ring " + std::to_string(r.k) + ": a dead chunk");
             }
+            if (r.gridIndex < 0) continue;
             const projv::SceneGrid& g = scene.grids[size_t(r.gridIndex)];
             for (int32_t h : g.cellToChunk)
                 if (h >= 0 && (size_t(h) >= scene.chunks.size() || !scene.chunks[size_t(h)].alive ||
@@ -891,10 +1006,10 @@ int selftest() {
             firstRows = liveChunks;
             firstBlobs = liveBlobs;
         }
-        // Flying moves the rings over different ground, so the counts drift; leaking would grow them
-        // without bound, and the rows would keep growing past the live ones.
-        if (liveChunks > firstRows * 3 / 2) fail("live chunks grew from " + std::to_string(firstRows) + " to " + std::to_string(liveChunks));
-        if (liveBlobs > firstBlobs * 3 / 2) fail("live blobs grew from " + std::to_string(firstBlobs) + " to " + std::to_string(liveBlobs));
+        if (step == 21) {
+            if (liveChunks != firstRows) fail("back at the start, " + std::to_string(liveChunks) + " chunks live, not " + std::to_string(firstRows));
+            if (liveBlobs != firstBlobs) fail("back at the start, " + std::to_string(liveBlobs) + " blobs live, not " + std::to_string(firstBlobs));
+        }
         if (scene.chunks.size() > liveChunks * 2 + 64) fail("chunk rows " + std::to_string(scene.chunks.size()) + " for " + std::to_string(liveChunks) + " live: not reused");
         std::printf("step %2d  x %5.0f m  %zu chunks live, %zu rows, %zu blobs\n", step, st.camera.x, liveChunks,
                     scene.chunks.size(), liveBlobs);

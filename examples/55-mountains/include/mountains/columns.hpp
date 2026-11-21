@@ -42,9 +42,52 @@ struct ColumnChunk {
 struct ColumnResult {
     int ring = 0;
     int64_t ix = 0, iz = 0;
-    std::vector<ColumnChunk> chunks;
+    std::vector<ColumnChunk> chunks;   // a voxel ring's
+    std::vector<float> farHeights;     // a far ring's: 64 x 64 heights, x fastest
+    std::vector<uint32_t> farColours;  // ... and colours, RGBA8 (sRGB), x fastest
     double sampleMs = 0, fillMs = 0;
 };
+
+// One column of a far ring (plan D14-D16): no voxels, a 64 x 64 tile of the ground at the ring's
+// resolution -- its height, raised by the canopy where there is forest, and its colour, the surface mix
+// blended rather than dithered -- for the renderer to march as a smooth surface.
+inline ColumnResult generateFarColumn(const Landform& land, int ring, int64_t ix, int64_t iz) {
+    using clock = std::chrono::steady_clock;
+    ColumnResult out;
+    out.ring = ring;
+    out.ix = ix;
+    out.iz = iz;
+    const double v = voxelSize(ring), c = cellSize(ring);
+    const double x0 = double(ix) * c, z0 = double(iz) * c;
+    const auto t0 = clock::now();
+    std::vector<Sample> samples;
+    land.sampleGrid(x0 + 0.5 * v, z0 + 0.5 * v, v, kChunkRes, kChunkRes, v, samples);
+    const auto t1 = clock::now();
+    out.farHeights.resize(samples.size());
+    out.farColours.resize(samples.size());
+    for (int j = 0; j < kChunkRes; ++j)
+        for (int i = 0; i < kChunkRes; ++i) {
+            const size_t k = size_t(j) * kChunkRes + size_t(i);
+            const Sample& s = samples[k];
+            const double x = x0 + (i + 0.5) * v, z = z0 + (j + 0.5) * v;
+            const SurfaceMix m = surfaceMix(s, x, z, v);
+            const double canopy = mix(canopyHeight(m.treeA), canopyHeight(m.treeB), m.treeMix);
+            out.farHeights[k] = float(s.height + m.cover * canopy * 0.7);
+            // Seen from the side, a canopy hides the ground between its crowns, and shades itself: as the
+            // drawn trees do. So the far colour takes more of the canopy than its cover, and darker.
+            SurfaceMix seen = m;
+            seen.cover = std::min(1.0, m.cover * 1.7);
+            Rgb col = mixColour(seen);
+            col = lerp(col, col * 0.75, seen.cover);
+            // The voxels' shades average 0.84 of their class colours: the same here, so the two meet.
+            col = col * 0.84;
+            auto byte = [](double v8) { return uint32_t(std::clamp(int(std::lround(v8 * 255.0)), 0, 255)); };
+            out.farColours[k] = byte(col.r) | (byte(col.g) << 8) | (byte(col.b) << 16) | (255u << 24);
+        }
+    out.sampleMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    out.fillMs = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
+    return out;
+}
 
 // How many voxels below its lowest neighbour a column is filled.
 constexpr int kSkirt = 4;
@@ -122,7 +165,8 @@ inline ColumnResult generateColumn(const Landform& land, const Palette& palette,
             // are tall enough for this ring: woodland keeps a silhouette and a shadow out to where a
             // voxel is taller than a fir.
             f.canopy = false;
-            if (canopyHeight(m) >= 0.6 * v) {   // only a plant not drawn as voxels comes back as its class
+            // Up to the 4 m ring: beyond, a whole voxel of forest is a block, and it casts a square shadow.
+            if (v <= 4.0 && canopyHeight(m) >= 0.6 * v) {   // only a plant not drawn as voxels comes back as its class
                 f.canopy = true;
                 f.ground = palette.at(mixAt.groundMix > 0.5 ? mixAt.groundB : mixAt.groundA, shade);
                 f.top += 1;
