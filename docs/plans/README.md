@@ -111,6 +111,7 @@ The twelve shader experiments:
 | Plan | Status | What |
 |---|---|---|
 | [biome-canyonlands.md](biome-canyonlands.md) | approved; C1, C2 built; C3 in progress | The terrain generator's first biome: a Colorado Plateau canyon network |
+| [mountains-santa-fe.md](mountains-santa-fe.md) | approved; M1 in progress | Mountains in the style of the Sangre de Cristo at Santa Fe: a clipmap of voxel rings to a ~100 km horizon, a fast renderer with aerial perspective |
 | [island-demo.md](island-demo.md) | delivered (wind deferred) | A generated island to break, gather and build with: tools, rubble into a hotbar, blocks placed back, a compass, saved worlds |
 
 ## Infrastructure
