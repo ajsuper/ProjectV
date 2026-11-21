@@ -102,10 +102,12 @@ inline SurfaceMix surfaceMix(const Sample& s, double x, double z, double footpri
     cover *= clamp01(0.75 + 0.6 * fbm(x / 700.0, z / 700.0, 3, 93));
     cover *= 1.0 - smoothstep(0.9, 1.3, slope);
     cover *= 1.0 - s.basalt * 0.6;
-    // At a fine footprint open woodland is crowns, not a tint.
+    // At a fine footprint open woodland is crowns, not a tint: a noise spread to roughly uniform on
+    // 0..1, under the cover, so the crowns take the same share of the ground the tint stands for (and
+    // a fine ring has as many trees as the coarser ring beside it).
     if (footprint < 6.0) {
-        const double dots = fbm(x / 5.0, z / 5.0, 2, 95);
-        cover = smoothstep(0.55, 0.6, cover + dots * 0.9 + 0.1);
+        const double crowns = clamp01(0.5 + 1.7 * fbm(x / 5.0, z / 5.0, 2, 95));
+        cover = 1.0 - smoothstep(cover - 0.03, cover + 0.03, crowns);
     }
     m.cover = cover;
 
@@ -137,9 +139,17 @@ inline Rgb mixColour(const SurfaceMix& m) {
     return c * (0.9 + 0.2 * m.shade);
 }
 
-// One material for a voxel, dithered by `hash` (a per-voxel random), and its shade.
-inline void pickMaterial(const SurfaceMix& m, uint32_t hash, Material& material, int& shade) {
-    auto u = [&](int k) { return unit(hash32(hash + uint32_t(k) * 0x9e3779b9U)); };
+// One material for a voxel, and its shade. Each choice compares a weight against a threshold: a
+// spatial noise (`coherent`, 0..1) where voxels are big on screen, so neighbours agree and the ground
+// has patches rather than a checkerboard, blending to `hash` (a per-voxel random) by `dither` where
+// a voxel is a pixel or less and the dither is what averages to the mix.
+inline void pickMaterial(const SurfaceMix& m, uint32_t hash, double coherent, double dither, Material& material,
+                         int& shade) {
+    auto u = [&](int k) {
+        const double r = unit(hash32(hash + uint32_t(k) * 0x9e3779b9U));
+        const double c = std::fmod(coherent + 0.618034 * k, 1.0);
+        return mix(c, r, dither);
+    };
     if (m.water > u(1)) material = Material::Water;
     else if (m.snow > u(2)) material = Material::Snow;
     else if (m.rock > u(3)) material = m.rockMix > u(4) ? m.rockB : m.rockA;

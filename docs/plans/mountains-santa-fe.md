@@ -1,6 +1,6 @@
 # Mountains: the Sangre de Cristo at Santa Fe
 
-Status: **approved**, 2026-11-21. **M1 built** (awaiting the user's look); M2 in progress. A new example, `examples/55-mountains` (target
+Status: **approved**, 2026-11-21. **M1, M2 built** (awaiting the user's look); M3 next. A new example, `examples/55-mountains` (target
 `mountains`), that generates mountains in the style of those around Santa Fe and draws them with a fast
 renderer of its own: voxels all the way to a horizon about 100 km out, detailed underfoot. It leaves
 `50-terrain-generator` (canyonlands, alpine) as it is.
@@ -144,6 +144,44 @@ threads).
 - Open: random provinces outside the layout read as isolated stamps (capsule ranges, round mesas). Basin
   and range chains, en-echelon ranges and dissected basins are later work; the Santa Fe layout is the
   priority.
+
+## M2 as built (2026-11-21)
+
+`examples/55-mountains`, target `mountains` (`main.cpp`, `include/mountains/columns.hpp`), drawn with the
+engine's basic renderer.
+
+- **Rings**: one `SceneGrid` and one component each (the same 224-slot palette interned into each). Ring k
+  spans 2R cells (R = N / 64), snapped to every second cell; its hole is ring k-1's extent. A ring
+  **generates its hole too, last, and keeps it**; a hole cell is hidden only once ring k-1 has generated
+  the four columns over it. So nothing is ever missing: while a finer ring catches up, the coarse cells
+  show. The grids are rebuilt from the columns whenever a ring changes (cheap: the grid tables are
+  rebuilt on every flush anyway), so **M2b (toroidal addressing) is not needed**.
+- **Columns**, on a pool: `sampleGrid` over 66 x 66 voxel columns (a border for the neighbours), each
+  filled from its surface down to 4 voxels below its lowest neighbour, one 64^3 chunk per vertical cell
+  touched, brick map -> tree -> tile table on the worker. Jobs are ordered by distance from the ring's
+  centre (every ring together, so fast flight cannot starve the horizon), the hole last; a column the
+  ring leaves before it is generated is cancelled.
+- **Altitude**: a ring narrower than the camera's height over the ground is dropped; the next ring shows
+  its hole instead.
+- **Materials**: one per voxel. A spatial noise decides up close (patches, not a checkerboard), a per-voxel
+  hash from 2 m voxels out (dither that averages to the mix). Both, and the crowns of open woodland, are
+  thresholds against roughly uniform noise, so a weight takes the same share of voxels in every ring: an
+  fBm threshold took 16% for a 25% cover and drew a line where two rings met.
+
+| N (voxels, centre to edge) | 512 (default) | 1024 |
+|---|---|---|
+| Columns per ring | 16 x 16 | 32 x 32 |
+| Reach of ring 10 | 131 km | 262 km |
+| Chunks, voxel memory | 3,153, 76 MB | 12,709, 303 MB |
+| Everything generated (16 threads, `--bench`) | 7.4 s | 30.0 s |
+
+- A column: ~33 ms sampling (66^2 samples), ~8 ms filling and building tables, the same in every ring.
+- Frame, settled (basic renderer, ~1 MP window): 15-17 ms. While streaming: 18-23 ms. 1440p would be
+  about 3.5x that: M3 has to render at half resolution (as `fast` does) to meet G4.
+- **Flight at 300 m/s, 400 m over the ground: streaming keeps up** (a few columns pending at times, in
+  rings 1-3).
+- Seams: none from geometry or colour statistics. A faint straight line remains where two rings meet on
+  flat ground (voxel steps of two sizes side by side); M3's light may hide it.
 
 ## Open questions
 
