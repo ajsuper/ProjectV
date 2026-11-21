@@ -1,6 +1,6 @@
 # Mountains: the Sangre de Cristo at Santa Fe
 
-Status: **approved**, 2026-11-21. M1 in progress. A new example, `examples/55-mountains` (target
+Status: **approved**, 2026-11-21. **M1 built** (awaiting the user's look); M2 in progress. A new example, `examples/55-mountains` (target
 `mountains`), that generates mountains in the style of those around Santa Fe and draws them with a fast
 renderer of its own: voxels all the way to a horizon about 100 km out, detailed underfoot. It leaves
 `50-terrain-generator` (canyonlands, alpine) as it is.
@@ -105,6 +105,35 @@ Each ends with captures shown to the user and a commit once approved.
 | M4 | **Ground**: materials, the 3D near band (granite outcrops, talus, cut banks, badland ledges, basalt rims), snow | Walk and fly captures approved |
 | M5 | **Vegetation**: the band table, aspect, the three tree LODs; new assets through the tree brush | The dotted PJ foothills and the dark fir slopes read from town |
 | M6 | **Finish**: camera presets (`MOUNTAINS_CAMERA=plaza|atalaya|baldy|...`), `MOUNTAINS_CAPTURE`, a README, docs rows, a selftest that flies a fixed path headless-capable and checks seams | Docs ctest passes; the example is in `examples/README.md` |
+
+## M1 as built (2026-11-21)
+
+`examples/55-mountains/include/mountains/landform.hpp` (header-only, no engine types) and
+`mountains_lab` (`tools/lab.cpp`; region, local, profile and two panoramas from the Plaza, ~25 s on 16
+threads).
+
+- **Macro**: a base that falls toward the Rio Grande (a polyline with elevations; the river's elevation is
+  blended over segments, since taking the nearest one left creases), plus features: `Range` (crest along a
+  line, rounded over 1.8 km, asymmetric concave flanks with a long apron, crest wander and peaks along it,
+  flanks varying in width), `Dome` (shield, caldera with a noisy wall, resurgent dome), `HillMass`,
+  `MesaField` (a level basalt cap over a talus apron, cinder cones). Laid out like Santa Fe within 95 km;
+  one random feature per 50 km cell beyond.
+- **Erosion**: phasor gullies (5x5 cells, a 1.5-cell falloff: a 4x4 neighbourhood missed points and left
+  straight seams), 9 octaves from 4.5 km, each `0.42 * 0.62^i * wavelength * slope` tall and following the
+  gradient so far. **Capped by relief**: the cap is `0.3 * relief * smoothstep(150, 700, relief) + 7`,
+  falling 0.6x per octave, where relief is the macro height over the base. Without it the piedmont grew
+  130 m hills 600 m from the Plaza and mesa scarps grew spikes.
+- **Detail**: slope-damped fBm from 160 m to the footprint. **Cirques**: bowls on north- and east-facing
+  sides under crests above 3,450 m, about half of them, some with tarns. **River gorge** cut last.
+- Reference elevations (target / got): Plaza 2133 / 2185, Tesuque Pk 3671 / 3816, Baldy 3850 / 3846,
+  Redondo 3431 / 3406, Sandia 3255 / 3193, Ortiz 2712 / ~2400, Cochiti 1620 / 1612.
+- Cost: ~25 us a sample at full detail (16 threads: a 1600^2 map in 4 s). Too slow for M2 as is: the macro
+  is evaluated five times per sample (for its gradient) and every octave per column. M2 splits the sampler
+  in two: the macro and the long-wavelength octaves on a coarse lattice per chunk, interpolated (height
+  and gradient), and the short octaves per column.
+- Open: random provinces outside the layout read as isolated stamps (capsule ranges, round mesas). Basin
+  and range chains, en-echelon ranges and dissected basins are later work; the Santa Fe layout is the
+  priority.
 
 ## Open questions
 
