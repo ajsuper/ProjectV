@@ -1327,7 +1327,7 @@ return {
 }
 ```
 
-Seven brushes ship in `brushes/`: `cracked_rock`, `crevice_shade`, `grass_tint` and `palette_paint` (material), `pitted_stone` — *Cracked Stone*, which opens cracks rather than painting them (geometry) — and `grass_tufts` and `trees` (scatter). **New Brush** writes a working template of the chosen kind, because the first thing anyone does with a new brush is preview it.
+Nine brushes ship in `brushes/`: `cracked_rock`, `crevice_shade`, `grass_tint` and `palette_paint` (material), `pitted_stone` — *Cracked Stone*, which opens cracks rather than painting them (geometry) — and `grass_tufts`, `trees`, `boulders` and `rocks` (scatter; `rocks` is the canyonlands biome's three sandstones, `boulders` the general one). **New Brush** writes a working template of the chosen kind, because the first thing anyone does with a new brush is preview it.
 
 ### Three kinds, decided by what they write
 
@@ -1467,6 +1467,48 @@ gaps open between limbs and the crown fills its shape the way a real one fills t
 The node search is incremental: a point's nearest node can only change when a node is added, so each
 new node is offered to the points in the grid cells around it once, rather than every point searching
 every node every step. Growth order is sorted, never table order, so a site always grows the same tree.
+
+#### `boulders`: shape x rock, groups, moss
+
+`brushes/boulders.lua` (plan: [`docs/plans/boulder-brush.md`](../../docs/plans/boulder-brush.md)). One
+call is a boulder **or a whole group** -- the fit test is all or nothing per placement, so a group
+lands whole and one undo takes it back.
+
+| Axis | Settings |
+|------|----------|
+| Shape (tick any; each boulder picks one) | Rounded, Angular, Slab, Split, Tor, Columns |
+| Rock (or Mixed: per group, or per boulder with *Mix rocks in a group*) | Granite, Basalt, Sandstone, Limestone, Slate, Gneiss, Ironstone, Quartzite |
+| Size | Height (2-64), Size variety, Width, Roughness |
+| Surface | Weathering (the rock's relief), Minerals (metal flecks), Quartz veins, Water stains, Tone variety |
+| Group | Group size (1-12), Group layout (Cluster, Pile, Line), Group spread, Rubble, Sunk |
+| Growth | Moss, Moss dryness, Moss depth, Moss on the shaded side, Lichen |
+
+**A rock is colour, finish and relief.** Each rock's ramp carries its own glossiness and metallic
+(slate's satin, quartzite's gloss, ironstone's lustre), accents are roles of their own (biotite mica,
+pyrite, specular haematite, glassy quartz veins), and its weathering is *geometry* added to the
+distance near the surface -- basalt's vesicles, sandstone's ridged beds and honeycomb, limestone's rain
+runnels and pits, slate's cleavage ridges, ironstone's knobs -- because the renderers light voxel relief
+and paint alone reads flat.
+
+**Each boulder is dropped**, largest first: onto the ground under its footprint (columns found with
+`pv.solid`) or onto the boulders already placed, then sunk by *Sunk*. Cells at or below the ground are
+clipped, never written, so nothing lands in the terrain on a slope. Cluster and Line keep satellites on
+the ground, pushing them outward until they are; Pile lets them sit on and lean against each other.
+
+**The distance is marched a column at a time**, stepping by its value far from the surface. Cells within
+2.5 of the surface are the shell, kept per cell; the interior is kept as runs per column and written only
+if the whole group fits the budget, otherwise the group is a shell. An estimate of each boulder's
+surface refuses an oversized group before any of it is built, with a reason naming Height, Width and
+Group size -- it used to run into the two-second call limit instead. The output is built in a fixed
+order, so there is no sort, and a site always gives the same placement.
+
+**Moss comes last**, from the assembled group: tops, the -z side (*Moss on the shaded side*), low down.
+Dense moss stands off the stone as a cushion one or two voxels deep. It is named `moss.*`, which the tree
+brush grows through.
+
+71 palette roles, all interned on the first stroke (the tree brush: 63). It grows through grass blades
+and flowers (`displaces`), but `pv.solid` cannot tell a blade from the ground, so in tall grass a
+boulder rests on the blade tips.
 
 ### Why a brush returns an index and not a colour
 

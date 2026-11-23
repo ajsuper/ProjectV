@@ -41,6 +41,7 @@ The editing system was delivered in phases. [edit-phases-changelog.md](edit-phas
 
 | Plan | Status | What |
 |---|---|---|
+| [boulder-brush.md](boulder-brush.md) | built (B1) | The scene editor's Boulders brush: six shapes x eight rocks, groups dropped onto the ground, moss and lichen |
 | [edit.md](edit.md) | built | Phase 1: per-component edit queues, copy-on-write blobs, negative grid expansion |
 | [edit_p5.md](edit_p5.md) | built | Incremental GPU upload (`flushSceneUpdates`, `RangeAllocator`) |
 | [edit_p6.md](edit_p6.md) | built | Hierarchical component tree, identity, transform API |
