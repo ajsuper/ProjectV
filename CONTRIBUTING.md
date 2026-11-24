@@ -37,6 +37,10 @@ plan (docs/plans/)  ──▶  build in milestones  ──▶  tests + a demo  �
 - [ ] A behaviour change has a test in `tests/unit/` ([tests/README.md](tests/README.md)); a bug
       fix has the test that would have caught it
 - [ ] Examples still build and run: they are the integration test, and an API change updates them
+- [ ] No C++ identifier is named `near` or `far` (nor `small`, `interface`, `ERROR`, `OPAQUE`,
+      `TRANSPARENT`, `ABSOLUTE`, `RELATIVE`, `IN`, `OUT`): Windows headers define them as macros,
+      `near` and `far` as nothing, so `FarField far;` reaches MSVC as `FarField ;`. Linux builds it and
+      the Windows CI fails -- this has broken CI more than once. Shaders are not affected.
 - [ ] Docs that describe the behaviour are updated; a new public header has a row in its
       [reference page](docs/reference/README.md) (the `docs` test enforces it)
 - [ ] The plan you worked from says what was built

@@ -817,18 +817,18 @@ private:
 
     // The ranges whose cirques could reach [x0, x1] x [z0, z1].
     void forEachRangeNear(double x0, double z0, double x1, double z1, const std::function<void(const Range&)>& fn) const {
-        auto near = [&](const Range& r) {
+        auto nearRange = [&](const Range& r) {
             const double reach = r.reach();
             return !(r.cx + reach < x0 || r.cx - reach > x1 || r.cz + reach < z0 || r.cz - reach > z1);
         };
-        for (const Range& r : ranges_) if (near(r)) fn(r);
+        for (const Range& r : ranges_) if (nearRange(r)) fn(r);
         const double cell = s_.provinceCell;
         const int64_t i0 = int64_t(std::floor(x0 / cell)) - 1, i1 = int64_t(std::floor(x1 / cell)) + 1;
         const int64_t j0 = int64_t(std::floor(z0 / cell)) - 1, j1 = int64_t(std::floor(z1 / cell)) + 1;
         for (int64_t j = j0; j <= j1; ++j)
             for (int64_t i = i0; i <= i1; ++i) {
                 Province p;
-                if (province(i, j, p) && p.kind == Province::RangeKind && near(p.range)) fn(p.range);
+                if (province(i, j, p) && p.kind == Province::RangeKind && nearRange(p.range)) fn(p.range);
             }
     }
 

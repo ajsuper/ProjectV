@@ -121,10 +121,10 @@ struct ShapeLibrary {
         if (list.empty()) return -1;
         double best = 1e30;
         for (int i : list) best = std::min(best, std::abs(std::log(shapes[size_t(i)].size / size)));
-        std::vector<int> near;
+        std::vector<int> closest;
         for (int i : list)
-            if (std::abs(std::log(shapes[size_t(i)].size / size)) <= best + 0.12) near.push_back(i);
-        return near[size_t(pick * double(near.size())) % near.size()];
+            if (std::abs(std::log(shapes[size_t(i)].size / size)) <= best + 0.12) closest.push_back(i);
+        return closest[size_t(pick * double(closest.size())) % closest.size()];
     }
 };
 

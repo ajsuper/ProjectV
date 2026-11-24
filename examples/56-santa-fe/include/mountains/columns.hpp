@@ -178,7 +178,7 @@ inline ColumnResult generateColumn(const Landform& land, const Palette& palette,
     // Every voxel ring, the 3.2 m one too: without it the trees went from silhouettes (1.6 m) to blocks of
     // canopy colour and back to the far field's crowns past it.
     const bool stampTrees = v <= 4.0;
-    const bool near = v <= 0.25;   // loose objects within the two finest rings; baked beyond
+    const bool nearRing = v <= 0.25;   // loose objects within the two finest rings; baked beyond
     std::vector<Tree> trees;
     std::vector<Placement> placements;   // to stamp (far rings)
     if (stampTrees) {
@@ -219,16 +219,16 @@ inline ColumnResult generateColumn(const Landform& land, const Palette& palette,
             };
             std::vector<Tree> mine, unplaced;
             for (const Tree& t : trees)
-                if (!near || (t.x >= x0 && t.x < x0 + c && t.z >= z0 && t.z < z0 + c)) mine.push_back(t);
-            if (!near) mine = trees;
+                if (!nearRing || (t.x >= x0 && t.x < x0 + c && t.z >= z0 && t.z < z0 + c)) mine.push_back(t);
+            if (!nearRing) mine = trees;
             for (Tree& t : mine) {   // on the relief (surface.hpp rockBlocks), not the smooth landform
                 Sample ts;
                 if (groundAt(t.x, t.z, ts)) t.base += rockBlocks(t.x, t.z, rockWeight(ts), kLattice).height;
             }
             treePlacements(*library, v, mine, placements, unplaced);
-            propPlacements(land.settings().seed, *library, v, x0, z0, c, 16.0 * kGameScale, near, propGround, trees, placements);
+            propPlacements(land.settings().seed, *library, v, x0, z0, c, 16.0 * kGameScale, nearRing, propGround, trees, placements);
             trees = std::move(unplaced);   // a kind the library has no tree of is stamped as 55 did
-            if (near) {
+            if (nearRing) {
                 for (const Placement& p : placements) out.props.push_back(looseInstance(*library, p));
                 placements.clear();
             }

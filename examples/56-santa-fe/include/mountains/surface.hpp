@@ -298,18 +298,18 @@ inline RockBlock rockBlocks(double x, double z, double rock, double footprint) {
     big.h *= 1.0 - 0.7 * style;
     fine.h *= 0.35 + 0.9 * style;
     if (fine.h > big.h) big = fine;
-    const Octave small = octave(1.4 * kGameScale * (1.0 - 0.4 * style), 823U, big.exposed ? 0.85 : bare * 0.7, 0.22);
+    const Octave smallOctave = octave(1.4 * kGameScale * (1.0 - 0.4 * style), 823U, big.exposed ? 0.85 : bare * 0.7, 0.22);
     // Clods and tussocks: everywhere, a hand high, gone under a voxel's footprint.
     double c1, c2;
     uint32_t cid;
     worley2(x / (0.5 * kGameScale), z / (0.5 * kGameScale), 839U, c1, c2, cid);
     const double clod = 0.07 * kGameScale * unit(hash32(cid + 5U)) * std::sqrt(smoothstep(0.0, 0.8, c2 - c1)) *
                         (1.0 - smoothstep(0.08 * kGameScale, 0.3 * kGameScale, footprint));
-    b.height = big.h + 0.45 * small.h + (big.exposed ? 0.0 : clod);
-    b.exposed = big.exposed || small.exposed;
+    b.height = big.h + 0.45 * smallOctave.h + (big.exposed ? 0.0 : clod);
+    b.exposed = big.exposed || smallOctave.exposed;
     // Regional tone (bands of lighter and darker rock), the block's own on it.
-    b.tone = clamp01(mix(big.tone, small.tone, 0.3) * 0.7 + 0.3 * clamp01(0.5 + 1.4 * fbm(x / (25.0 * kGameScale), z / (25.0 * kGameScale), 2, 859)));
-    b.crack = std::max(big.crack, small.crack * 0.6) * (1.0 - smoothstep(0.6, 2.5, footprint));
+    b.tone = clamp01(mix(big.tone, smallOctave.tone, 0.3) * 0.7 + 0.3 * clamp01(0.5 + 1.4 * fbm(x / (25.0 * kGameScale), z / (25.0 * kGameScale), 2, 859)));
+    b.crack = std::max(big.crack, smallOctave.crack * 0.6) * (1.0 - smoothstep(0.6, 2.5, footprint));
     return b;
 }
 

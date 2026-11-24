@@ -115,6 +115,12 @@ cd tests/manual && make && ./exit_path a && ./exit_path b
 
 ## Codebase Conventions
 
+- **Never name a C++ variable, member, parameter or lambda `near` or `far`.** Windows headers define both as
+  *empty macros*, so `FarField far;` reaches MSVC as `FarField ;` and `auto near = ...` as `auto = ...`.
+  GCC and Clang build it, so it only fails in the Windows CI, and it has broken CI repeatedly (55-mountains,
+  56-santa-fe, before them `docs/plans/windows.md`). Use `farField`, `nearRing`, `closest`. Same trap, rarer:
+  `small`, `interface`, `ERROR`, `OPAQUE`, `TRANSPARENT`, `ABSOLUTE`, `RELATIVE`, `IN`, `OUT`. Shader code is
+  not affected (`s0.far` in a `.frag` is fine).
 - Namespace `projv` for core types, `projv::utils` for utilities, `projv::graphics` for GPU,
   `projv::runtime` for the Scene bridge, `projv::net` for transport and wire format, `projv::ui`
   (`ui::dev`, `ui::user`) for the UI.

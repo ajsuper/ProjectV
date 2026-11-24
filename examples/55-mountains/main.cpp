@@ -201,7 +201,7 @@ struct Clipmap {
     int voxelRings = 5;   // rings [0, voxelRings) are voxels; the rest heightfields (D14)
     int64_t radius = 8;   // cells from the centre to the edge (N / 64)
     std::vector<Ring> ring;
-    FarField far;
+    FarField farField;
 
     bool isFar(int k) const { return k >= voxelRings; }
     // The state texel and the atlas texel of a far ring's column.
@@ -217,13 +217,13 @@ struct Clipmap {
     void setFarState(int k, int64_t ix, int64_t iz, bool held) {
         int sx, sz, ax, az;
         farSlot(k, ix, iz, sx, sz, ax, az);
-        uint8_t* p = &far.state[(size_t(sz) * size_t(far.stateWidth) + size_t(sx)) * 4];
+        uint8_t* p = &farField.state[(size_t(sz) * size_t(farField.stateWidth) + size_t(sx)) * 4];
         if (held) {
             p[0] = uint8_t(ix & 255); p[1] = uint8_t(iz & 255); p[2] = 255; p[3] = 255;
         } else if (p[0] == uint8_t(ix & 255) && p[1] == uint8_t(iz & 255)) {
             p[2] = 0;   // only if it still holds this column, not the one that took its slot
         }
-        far.stateDirty = true;
+        farField.stateDirty = true;
     }
 
     int64_t span() const { return 2 * radius; }
@@ -413,8 +413,8 @@ int installResults(Clipmap& cm, projv::Scene& scene, Pool& pool, double budgetMs
             if (cm.isFar(res.ring)) {
                 int sx, sz, ax, az;
                 cm.farSlot(res.ring, res.ix, res.iz, sx, sz, ax, az);
-                if (cm.far.upload)
-                    cm.far.uploads.push_back({ax, az, std::move(res.farHeights), std::move(res.farColours)});
+                if (cm.farField.upload)
+                    cm.farField.uploads.push_back({ax, az, std::move(res.farHeights), std::move(res.farColours)});
                 cm.setFarState(res.ring, res.ix, res.iz, true);
             }
             for (ColumnChunk& cc : res.chunks) {
@@ -513,7 +513,7 @@ void setUpRings(State& st, projv::Scene& scene) {
         cm.radius = 8;
     }
     {
-        FarField& f = cm.far;
+        FarField& f = cm.farField;
         const int square = int(cm.span()) * kChunkRes;
         f.width = FarField::kAtlasCols * square;
         f.height = FarField::kAtlasRows * square;
@@ -626,7 +626,7 @@ std::shared_ptr<projv::ConstructedRenderer> buildRenderer(projv::graphics::Rende
 // texture when it changed (texture ids in renderer/resources.json).
 constexpr uint32_t kFarHeightTexture = 16, kFarColourTexture = 17, kFarStateTexture = 18;
 void uploadFarField(State& st) {
-    FarField& f = st.clipmap.far;
+    FarField& f = st.clipmap.farField;
     if (!st.renderer) return;
     auto& handles = st.renderer->resources.textures.textureHandles;
     const bgfx::TextureHandle heights = handles[kFarHeightTexture], colours = handles[kFarColourTexture];
@@ -769,7 +769,7 @@ void startup(projv::Application& app) {
     const char* which = std::getenv("MOUNTAINS_RENDERER");
     if (!which || std::string(which) != "basic") {
         st.renderer = buildRenderer(ri);
-        st.clipmap.far.upload = true;
+        st.clipmap.farField.upload = true;
         app.world.ctx().emplace<projv::CameraView>();
         app.world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
         if (const char* cap = std::getenv("MOUNTAINS_CAPTURE")) st.capturePath = cap;
