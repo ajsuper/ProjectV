@@ -161,6 +161,10 @@ struct PjvRayQuery {
     // became indistinguishable. Defaulted to 0.002 by every constructor, so nothing that predates
     // this field changes by a bit.
     float minTransmittance;
+    // World units. Loose chunks are walked only this far along the ray; grids the whole way (to
+    // maxDistance). For rays whose loose occluders can only be near their start: a shadow ray from the
+    // ground among props no taller than a few metres need not walk every prop to the horizon.
+    float looseMaxDistance;
 };
 
 // The three constructors. One of these, or a copy of one, is the only sanctioned way to get a query.
@@ -182,6 +186,7 @@ PjvRayQuery pjvRayQueryRaw(uint maxSteps) {
     q.animResolveDistance = 0.0;
     q.seed = 0u;
     q.minTransmittance = 0.002;
+    q.looseMaxDistance = 1e30;
     return q;
 }
 // A camera or reflection ray: wants the nearest surface, over the whole ray.
@@ -226,6 +231,8 @@ void pjvQueryAnimation(inout PjvRayQuery q, float resolveDistance) {
 #ifdef PJV_SCENE_DEBUG
 void pjvQueryAnimationDebugSolid(inout PjvRayQuery q) { q.flags |= PJV_Q_ANIM_DEBUG_SOLID; }
 #endif
+// Loose chunks only within `distance` of the ray's origin (see PjvRayQuery::looseMaxDistance).
+void pjvQueryLooseReach(inout PjvRayQuery q, float distance) { q.looseMaxDistance = distance; }
 void pjvQueryLinearLOD(inout PjvRayQuery q, uint finishLOD, uint rampDistanceVoxels) {
     q.startLOD = 0u;
     q.finishLOD = finishLOD;
@@ -253,6 +260,7 @@ PjvRayQuery pjvValidateQuery(PjvRayQuery q) {
     q.animResolveDistance = 0.0;
     q.seed = 0u;
     q.minTransmittance = 0.002;
+    q.looseMaxDistance = 1e30;
     return q;
 }
 
@@ -3159,6 +3167,33 @@ float pjvGridEntryT(PjvRay ray, int gridIndex) {
     return tEnter;
 }
 
+// Every grid volume (top-level uniform-grid DDA), pruned by and updating the closest hit so far. Called
+// once from pjvRaySceneIntersectFrom: after the loose chunks by default, before them with
+// PJV_SCENE_GRIDS_FIRST. Grids first suits a scene of many small loose chunks over grid terrain (props
+// on the ground): every ray's loose walk then stops at the ground instead of visiting every prop along
+// its length. Loose first suits a few large bodies in front of the grids. Either order finds the same
+// nearest hit; only one of the two call sites is compiled.
+//
+// A second pjvCastRayThroughTree64 call site (inside pjvMarchGrid), against the loose loop's. One
+// candidate loop feeding both from a single call -- the lab's shape -- was tried and measured:
+// no gain on the gallery scenes, and Voxel Mayhem's G-buffer went from 2.3 to 3.6 ms and its probes
+// from 0.5 to 1.5 ms, the merged loop holding the BVH stack and the grid walk live at once.
+void pjvSceneMarchGrids(PjvRay ray, PjvRayQuery rayQuery, float tMin, int gridCount, int soloKind, int soloIndex,
+                        float soloLimit, inout float closestDistance, inout PjvSceneIntersectData sceneIntersect,
+                        inout PjvVoxelMaterial winnerMaterial, inout bool winnerMaterialValid, inout PjvPeelAccum peel) {
+    for(int gi = 0; gi < gridCount; gi++){
+        if (peel.stopped) break;
+        float limitT = (soloKind == 1 && soloIndex == gi) ? soloLimit : -1.0;
+        PjvSceneIntersectData gh = pjvMarchGrid(ray, rayQuery, gi, closestDistance, tMin, limitT, peel);
+        if(gh.foundBox.size > 0 && gh.rayT >= 0 && gh.rayT < closestDistance){
+            sceneIntersect = gh;
+            closestDistance = gh.rayT;
+            winnerMaterial = peel.hitMaterial;
+            winnerMaterialValid = peel.hitMaterialValid;
+        }
+    }
+}
+
 PjvSceneIntersectData pjvRaySceneIntersectFrom(PjvRay ray, PjvRayQuery rayQuery, float tMin, inout PjvPeelAccum peel) {
     // Nothing beyond the query's own limit can be the answer, so the search starts pruned there.
     float closestDistance = min(100000000.0, rayQuery.maxDistance);
@@ -3223,6 +3258,12 @@ PjvSceneIntersectData pjvRaySceneIntersectFrom(PjvRay ray, PjvRayQuery rayQuery,
     PjvVoxelMaterial winnerMaterial = pjvEmptyVoxelMaterial();
     bool winnerMaterialValid = false;
 
+#ifdef PJV_SCENE_GRIDS_FIRST
+    // The grids first, so the loose walk below is cut off at the ground (see pjvSceneMarchGrids).
+    pjvSceneMarchGrids(ray, rayQuery, tMin, gridCount, soloKind, soloIndex, soloLimit, closestDistance, sceneIntersect,
+                       winnerMaterial, winnerMaterialValid, peel);
+#endif
+
     // Loose (transform-placed) chunks. With a BVH (utils/loose_bvh.h) only the chunks in leaves the
     // ray reaches before the nearest hit so far are visited, nearest leaves first; without one, the
     // whole list is. Both feed ONE loop body with ONE pjvCastRayThroughTree64 call: the loop asks for
@@ -3246,7 +3287,7 @@ PjvSceneIntersectData pjvRaySceneIntersectFrom(PjvRay ray, PjvRayQuery rayQuery,
             #endif
             PjvLooseBVHNode node = pjvLooseBVHNode(bvhStack[stackTop], looseCount);
             float entry = pjvLooseBVHEntry(ray.origin, inverseDirection, node.boxMin, node.boxMax);
-            if (entry < 0.0 || entry >= closestDistance) continue;
+            if (entry < 0.0 || entry >= min(closestDistance, rayQuery.looseMaxDistance)) continue;
             if ((node.a & 0x80000000u) != 0u) {
                 rangeNext = int(node.a & 0x7FFFFFFFu);
                 rangeEnd = rangeNext + int(node.b);
@@ -3262,8 +3303,8 @@ PjvSceneIntersectData pjvRaySceneIntersectFrom(PjvRay ray, PjvRayQuery rayQuery,
             int farChild  = rightFirst ? int(node.a) : int(node.b);
             float nearEntry = rightFirst ? rightEntry : leftEntry;
             float farEntry  = rightFirst ? leftEntry : rightEntry;
-            if (farEntry >= 0.0 && farEntry < closestDistance && stackTop < PJV_LOOSE_BVH_STACK) bvhStack[stackTop++] = farChild;
-            if (nearEntry >= 0.0 && nearEntry < closestDistance && stackTop < PJV_LOOSE_BVH_STACK) bvhStack[stackTop++] = nearChild;
+            if (farEntry >= 0.0 && farEntry < min(closestDistance, rayQuery.looseMaxDistance) && stackTop < PJV_LOOSE_BVH_STACK) bvhStack[stackTop++] = farChild;
+            if (nearEntry >= 0.0 && nearEntry < min(closestDistance, rayQuery.looseMaxDistance) && stackTop < PJV_LOOSE_BVH_STACK) bvhStack[stackTop++] = nearChild;
         }
         if (rangeNext >= rangeEnd) break;
         int i = rangeNext++;
@@ -3281,7 +3322,7 @@ PjvSceneIntersectData pjvRaySceneIntersectFrom(PjvRay ray, PjvRayQuery rayQuery,
         tree64BoundingBox.position = vec3(0.0);
         tree64BoundingBox.size = h.scale;
         float tBB = pjvGetRayBoxEntryDistance(localRay, tree64BoundingBox);
-        if(tBB < 0 || tBB >= closestDistance) continue;
+        if(tBB < 0 || tBB >= min(closestDistance, rayQuery.looseMaxDistance)) continue;
 
         float limitT = (soloKind == 0 && soloIndex == i) ? soloLimit : -1.0;
         PjvSceneIntersectData tree64Intersect = pjvCastRayThroughTree64(ray, rayQuery, tMin, int(headerIndex), limitT, closestDistance, peel);
@@ -3299,23 +3340,11 @@ PjvSceneIntersectData pjvRaySceneIntersectFrom(PjvRay ray, PjvRayQuery rayQuery,
         }
     }
 
+#ifndef PJV_SCENE_GRIDS_FIRST
     // Grid volumes: top-level uniform-grid DDA, pruned by the closest loose hit so far.
-    //
-    // A second pjvCastRayThroughTree64 call site (inside pjvMarchGrid), against the loose loop's above. One
-    // candidate loop feeding both from a single call -- the lab's shape -- was tried and measured:
-    // no gain on the gallery scenes, and Voxel Mayhem's G-buffer went from 2.3 to 3.6 ms and its probes
-    // from 0.5 to 1.5 ms, the merged loop holding the BVH stack and the grid walk live at once.
-    for(int gi = 0; gi < gridCount; gi++){
-        if (peel.stopped) break;
-        float limitT = (soloKind == 1 && soloIndex == gi) ? soloLimit : -1.0;
-        PjvSceneIntersectData gh = pjvMarchGrid(ray, rayQuery, gi, closestDistance, tMin, limitT, peel);
-        if(gh.foundBox.size > 0 && gh.rayT >= 0 && gh.rayT < closestDistance){
-            sceneIntersect = gh;
-            closestDistance = gh.rayT;
-            winnerMaterial = peel.hitMaterial;
-            winnerMaterialValid = peel.hitMaterialValid;
-        }
-    }
+    pjvSceneMarchGrids(ray, rayQuery, tMin, gridCount, soloKind, soloIndex, soloLimit, closestDistance, sceneIntersect,
+                       winnerMaterial, winnerMaterialValid, peel);
+#endif
 
     peel.hitMaterial = winnerMaterial;
     peel.hitMaterialValid = winnerMaterialValid;

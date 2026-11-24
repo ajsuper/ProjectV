@@ -1,0 +1,489 @@
+{
+    "uniforms": [
+        {
+            "name": "windowRes",
+            "type": "vec4"
+        },
+        {
+            "name": "sunDir",
+            "type": "vec4"
+        },
+        {
+            "name": "frameCount",
+            "type": "vec4"
+        },
+        {
+            "name": "renderParams",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnSun",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnAtmos",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnSunAir",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnFar0",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnFar1",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnFar2",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnFar3",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnFar4",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnFar5",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnVoxelBox",
+            "type": "vec4"
+        },
+        {
+            "name": "sfFlags",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnCanopy",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnClouds",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnWind",
+            "type": "vec4"
+        },
+        {
+            "name": "mtnFog",
+            "type": "vec4"
+        },
+        {
+            "name": "sfDisplay",
+            "type": "vec4"
+        },
+        {
+            "name": "sfQuality",
+            "type": "vec4"
+        },
+        {
+            "name": "sfDisplay2",
+            "type": "vec4"
+        },
+        {
+            "name": "jitterParams",
+            "type": "vec4"
+        },
+        {
+            "name": "sfRecon",
+            "type": "vec4"
+        },
+        {
+            "name": "sfTemporal",
+            "type": "vec4"
+        },
+        {
+            "name": "sfFar",
+            "type": "vec4"
+        },
+        {
+            "name": "sfShadow",
+            "type": "vec4"
+        },
+        {
+            "name": "sfGlow",
+            "type": "vec4"
+        },
+        {
+            "name": "sfCloudMap",
+            "type": "vec4"
+        },
+        {
+            "name": "sfBevel",
+            "type": "vec4"
+        },
+        {
+            "name": "sfSSS",
+            "type": "vec4"
+        },
+        {
+            "name": "sfMotes",
+            "type": "vec4"
+        },
+        {
+            "name": "sfRays",
+            "type": "vec4"
+        },
+        {
+            "name": "sfTime",
+            "type": "vec4"
+        },
+        {
+            "name": "sfAO",
+            "type": "vec4"
+        },
+        {
+            "name": "sfAOBlur",
+            "type": "vec4"
+        },
+        {
+            "name": "sfShadowLOD",
+            "type": "vec4"
+        },
+        {
+            "name": "sfCloudMapPrev",
+            "type": "vec4"
+        },
+        {
+            "name": "sfSSAO",
+            "type": "vec4"
+        },
+        {
+            "name": "sfLeafSpread",
+            "type": "vec4"
+        },
+        {
+            "name": "sfSnow",
+            "type": "vec4"
+        },
+        {
+            "name": "sfGlint",
+            "type": "vec4"
+        }
+    ],
+    "shaders": [
+        {
+            "shaderID": 1,
+            "path": "./renderer/shaders/depth_pre.bin"
+        },
+        {
+            "shaderID": 2,
+            "path": "./renderer/shaders/trace.bin"
+        },
+        {
+            "shaderID": 3,
+            "path": "./renderer/shaders/resolve.bin"
+        },
+        {
+            "shaderID": 4,
+            "path": "./renderer/shaders/display.bin"
+        },
+        {
+            "shaderID": 5,
+            "path": "./renderer/shaders/reconstruct.bin"
+        },
+        {
+            "shaderID": 6,
+            "path": "./renderer/shaders/shadow_soft.bin"
+        },
+        {
+            "shaderID": 7,
+            "path": "./renderer/shaders/clouds.bin"
+        },
+        {
+            "shaderID": 8,
+            "path": "./renderer/shaders/glow.bin"
+        },
+        {
+            "shaderID": 9,
+            "path": "./renderer/shaders/cloud_shadow.bin"
+        },
+        {
+            "shaderID": 10,
+            "path": "./renderer/shaders/ao_trace.bin"
+        }
+    ],
+    "textures": [
+        {
+            "texID": 1,
+            "name": "cloudNoise",
+            "format": "RGBA8",
+            "resX": 2080,
+            "resY": 1040,
+            "sizeMode": "fixed",
+            "origin": "CPUBuffer"
+        },
+        {
+            "texID": 16,
+            "name": "farHeight",
+            "format": "R32_FLOAT",
+            "resX": 3072,
+            "resY": 2048,
+            "sizeMode": "fixed",
+            "origin": "CPUBuffer"
+        },
+        {
+            "texID": 17,
+            "name": "farColour",
+            "format": "RGBA8",
+            "resX": 3072,
+            "resY": 2048,
+            "sizeMode": "fixed",
+            "origin": "CPUBuffer"
+        },
+        {
+            "texID": 18,
+            "name": "farState",
+            "format": "RGBA8",
+            "resX": 96,
+            "resY": 16,
+            "sizeMode": "fixed",
+            "origin": "CPUBuffer"
+        },
+        {
+            "texID": 19,
+            "name": "farCanopy",
+            "format": "RGBA8",
+            "resX": 3072,
+            "resY": 2048,
+            "sizeMode": "fixed",
+            "origin": "CPUBuffer"
+        },
+        {
+            "texID": 2,
+            "name": "preDepth",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.0625,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 3,
+            "name": "traced",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 5,
+            "name": "gPos",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 6,
+            "name": "gNormal",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 7,
+            "name": "gFace",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 8,
+            "name": "gRot",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 9,
+            "name": "gMotion",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 10,
+            "name": "reconstructed",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 4,
+            "name": "resolved",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 20,
+            "name": "farMax",
+            "format": "R32_FLOAT",
+            "resX": 96,
+            "resY": 16,
+            "sizeMode": "fixed",
+            "origin": "CPUBuffer"
+        },
+        {
+            "texID": 11,
+            "name": "gSun",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 12,
+            "name": "lit",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 13,
+            "name": "clouds",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.25,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 14,
+            "name": "cloudDepth",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.25,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 15,
+            "name": "glow",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.25,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 21,
+            "name": "rNormal",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 22,
+            "name": "rFace",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 23,
+            "name": "rRot",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 24,
+            "name": "cloudShadowMap",
+            "format": "RGBA16_FLOAT",
+            "resX": 256,
+            "resY": 256,
+            "sizeMode": "fixed",
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 25,
+            "name": "aoTraced",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.25,
+            "origin": "CreateNew"
+        }
+    ],
+    "framebuffers": [
+        {
+            "fboID": 1,
+            "textureIDs": [
+                2
+            ]
+        },
+        {
+            "fboID": 2,
+            "textureIDs": [
+                3,
+                5,
+                6,
+                7,
+                8,
+                9,
+                11
+            ]
+        },
+        {
+            "fboID": 3,
+            "textureIDs": [
+                10
+            ]
+        },
+        {
+            "fboID": 4,
+            "textureIDs": [
+                4
+            ]
+        },
+        {
+            "fboID": 5,
+            "textureIDs": [
+                12,
+                21,
+                22,
+                23
+            ]
+        },
+        {
+            "fboID": 6,
+            "textureIDs": [
+                13,
+                14
+            ]
+        },
+        {
+            "fboID": 7,
+            "textureIDs": [
+                15
+            ]
+        },
+        {
+            "fboID": 8,
+            "textureIDs": [
+                24
+            ]
+        },
+        {
+            "fboID": 9,
+            "textureIDs": [
+                25
+            ]
+        }
+    ]
+}

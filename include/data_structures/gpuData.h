@@ -95,6 +95,13 @@ namespace projv {
 
         uint32_t looseCount = 0;
         uint32_t looseCapacity = 0;
+        // The loose list as last uploaded (leaf order, the BVH's nodes after it) and a signature of what
+        // it was built from: the handles, their headers and their blobs' content stamps. A flush whose
+        // loose chunks hash the same reuses it, skipping the BVH build and the upload -- with
+        // thousands of static props those were most of a flush.
+        uint64_t looseSignature = 0;
+        bool looseSignatureValid = false;
+        uint32_t looseBVHNodeCount = 0;
 
         uint32_t gridInfoTexWidth = 0;
         uint32_t cellMapTexWidth = 0, cellMapTexHeight = 0;

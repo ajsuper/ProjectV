@@ -995,9 +995,39 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             // first texel boundary after the list: two texels a node, {min.xyz, max.x} and
             // {max.yz, a, b}. gridInfo texel 0's fourth word carries the node count, 0 meaning "no
             // tree, walk the list" -- which is what an older shader reads it as anyway.
+            // What the loose list and its tree are built from, hashed (FNV-1a over the handles, their
+            // headers and their blobs' content stamps): when it matches the last upload's, the uploaded
+            // texture is still right and neither the tree nor the texture is rebuilt.
+            uint64_t signature = 1469598103934665603ull;
+            auto mixIn = [&signature](const void* data, size_t bytes) {
+                const unsigned char* p = static_cast<const unsigned char*>(data);
+                for (size_t i = 0; i < bytes; i++) { signature ^= p[i]; signature *= 1099511628211ull; }
+            };
+            const uint32_t bvhOn = utils::looseBVHEnabled() ? 1u : 0u;
+            mixIn(&bvhOn, sizeof(bvhOn));
+            for (uint32_t h : looseList) {
+                mixIn(&h, sizeof(h));
+                if (h >= scene.chunks.size()) continue;
+                const Chunk& c = scene.chunks[h];
+                const float hdr[9] = {c.header.position.x, c.header.position.y, c.header.position.z, c.header.scale,
+                                      c.header.rotation.w, c.header.rotation.x, c.header.rotation.y, c.header.rotation.z,
+                                      c.alive ? 1.0f : 0.0f};
+                mixIn(hdr, sizeof(hdr));
+                mixIn(&c.header.resolution, sizeof(c.header.resolution));
+                mixIn(&c.geometryPoolIndex, sizeof(c.geometryPoolIndex));
+                if (c.geometryPoolIndex >= 0 && size_t(c.geometryPoolIndex) < scene.geometryPool.size())
+                    mixIn(&scene.geometryPool[size_t(c.geometryPoolIndex)].contentStamp,
+                          sizeof(scene.geometryPool[size_t(c.geometryPoolIndex)].contentStamp));
+            }
+            const bool looseUnchanged = gpuData.looseSignatureValid && signature == gpuData.looseSignature &&
+                                        bgfx::isValid(gpuData.looseListTexture);
+
             uint32_t bvhNodeCount = 0;
             std::vector<uint32_t> bvhNodes;
-            if (utils::looseBVHEnabled() && looseList.size() >= LOOSE_BVH_MIN_CHUNKS) {
+            if (looseUnchanged) {
+                bvhNodeCount = gpuData.looseBVHNodeCount;
+                looseList.resize(gpuData.looseCount);   // only the count is read below; the texture stays
+            } else if (utils::looseBVHEnabled() && looseList.size() >= LOOSE_BVH_MIN_CHUNKS) {
                 std::vector<ChunkHandle> handles(looseList.begin(), looseList.end());
                 utils::LooseBVH bvh = utils::buildLooseBVH(scene, handles);
                 looseList.assign(bvh.chunks.begin(), bvh.chunks.end());
@@ -1101,7 +1131,10 @@ GPUChunkHeader makeHeader(const Chunk& chunk, const GPUBlobRange& r,
             }
 
             // --- LooseList (2D), with the BVH's nodes after it ---
-            {
+            if (!looseUnchanged) {
+                gpuData.looseSignature = signature;
+                gpuData.looseSignatureValid = true;
+                gpuData.looseBVHNodeCount = bvhNodeCount;
                 if (bvhNodeCount > 0) {
                     while (looseList.size() % 4 != 0) looseList.push_back(0xFFFFFFFFu);
                     looseList.insert(looseList.end(), bvhNodes.begin(), bvhNodes.end());
