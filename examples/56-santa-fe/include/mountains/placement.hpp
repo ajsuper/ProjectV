@@ -56,55 +56,174 @@ struct Shape {
     }
 };
 
-// The pyramid: a coarse voxel is solid when at least a fifth of the finest voxels under it are (less for a
-// shape too sparse for that at a level: see below), with the slot
-// of a solid one under it. The fraction is carried down from level 0 (a float a voxel), not re-decided from
-// the level above: "two of eight" decided level by level wore a sparse crown's outer layer away at every
-// level, and by the 1.6 m ring a tree was a few blocks (then the far field's full crowns past it: trees,
-// specks, trees, as the distance grew).
+// The pyramid (santa-fe-reference S27c): each coarse level covers what the shape covers. A coarse voxel's
+// *coverage* is how much of its block the shape hides, seen along each axis (the share of the block's lines of
+// finest voxels, x, y and z, that meet a solid one), averaged. The voxels are made solid in order of coverage
+// until the level's projected area -- from the side (along x and z) and, at half the weight, from above --
+// comes nearest the shape's own. So a sparse crown stays as big as it looks at every level: a "fifth filled"
+// rule kept 0.2-1.3x of a fir's side and 0.2-1.0x of its top (by the 1.6 m ring a fir was specks, the ground
+// showing through as streaks), this one 0.95-1.1x of the side.
+//
+// A solid coarse voxel takes the slot its block shows from outside the shape (its voxels that are the first
+// solid along their row from any of the six sides, by how many): the crown's skin, not the first solid voxel in
+// the block (often bark) nor the commonest thin voxel (branches are all surface, leaves in clusters are not).
 inline void buildMips(Shape& s) {
-    constexpr float kSolid = 0.2f;
     s.mip.clear();
     s.mipDims.clear();
     s.mip.push_back(s.v);
     s.mipDims.push_back({s.nx, s.ny, s.nz});
-    std::vector<float> density(s.v.size());
-    std::vector<uint8_t> slot = s.v;   // any slot under a voxel, solid or not
-    for (size_t i = 0; i < s.v.size(); ++i) density[i] = s.v[i] ? 1.0f : 0.0f;
-    for (int k = 1; k < 8; ++k) {
-        const auto d = s.mipDims.back();
-        if (d[0] <= 1 && d[1] <= 1 && d[2] <= 1) break;
-        const std::array<int, 3> e{(d[0] + 1) / 2, (d[1] + 1) / 2, (d[2] + 1) / 2};
-        const size_t n = size_t(e[0]) * size_t(e[1]) * size_t(e[2]);
-        std::vector<uint8_t> out(n, 0), slotOut(n, 0);
-        std::vector<float> densOut(n, 0.0f);
-        for (int z = 0; z < e[2]; ++z)
-            for (int y = 0; y < e[1]; ++y)
-                for (int x = 0; x < e[0]; ++x) {
-                    float sum = 0.0f;
-                    uint8_t solidSlot = 0, anySlot = 0;
-                    for (int c = 0; c < 8; ++c) {
-                        const int cx = 2 * x + (c & 1), cy = 2 * y + ((c >> 1) & 1), cz = 2 * z + (c >> 2);
-                        if (cx >= d[0] || cy >= d[1] || cz >= d[2]) continue;
-                        const size_t ci = (size_t(cz) * size_t(d[1]) + size_t(cy)) * size_t(d[0]) + size_t(cx);
-                        sum += density[ci];
-                        if (!anySlot) anySlot = slot[ci];
-                        if (!solidSlot && s.mip.back()[ci]) solidSlot = s.mip.back()[ci];
-                    }
-                    const size_t oi = (size_t(z) * size_t(e[1]) + size_t(y)) * size_t(e[0]) + size_t(x);
-                    densOut[oi] = sum / 8.0f;
-                    slotOut[oi] = solidSlot ? solidSlot : anySlot;
+    const int nx = s.nx, ny = s.ny, nz = s.nz;
+    auto at0 = [&](int x, int y, int z) -> uint8_t {
+        if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return 0;
+        return s.v[(size_t(z) * size_t(ny) + size_t(y)) * size_t(nx) + size_t(x)];
+    };
+    // The shape's solid voxels, and how many of the six sides each is seen from (the first solid along its
+    // row from that side): what the shape shows from outside.
+    struct Vox { int x, y, z; uint8_t slot; uint8_t seen; };
+    std::vector<Vox> solid;
+    std::vector<int32_t> index(s.v.size(), -1);
+    for (int z = 0; z < nz; ++z)
+        for (int y = 0; y < ny; ++y)
+            for (int x = 0; x < nx; ++x)
+                if (const uint8_t k = at0(x, y, z)) {
+                    index[(size_t(z) * size_t(ny) + size_t(y)) * size_t(nx) + size_t(x)] = int32_t(solid.size());
+                    solid.push_back({x, y, z, k, 0});
                 }
-        // Solid at a fifth filled -- or, when even the shape's densest voxel at this level is under that (a 4 m
-        // juniper in 3.2 m voxels), at 60% of that densest: every tree keeps its core at every level (the 3.2 m
-        // ring was a barren band between trees nearer and the far field's crowns beyond).
-        float densest = 0.0f;
-        for (float dv : densOut) densest = std::max(densest, dv);
-        const float solidAt = std::min(kSolid, 0.6f * densest);
-        for (size_t oi = 0; oi < n; ++oi)
-            if (densOut[oi] > 0.0f && densOut[oi] >= solidAt) out[oi] = slotOut[oi];
-        density = std::move(densOut);
-        slot = std::move(slotOut);
+    auto see = [&](int x, int y, int z) {
+        const int32_t i = index[(size_t(z) * size_t(ny) + size_t(y)) * size_t(nx) + size_t(x)];
+        if (i >= 0) ++solid[size_t(i)].seen;
+        return i >= 0;
+    };
+    for (int z = 0; z < nz; ++z)
+        for (int y = 0; y < ny; ++y) {
+            for (int x = 0; x < nx; ++x) if (see(x, y, z)) break;
+            for (int x = nx - 1; x >= 0; --x) if (see(x, y, z)) break;
+        }
+    for (int z = 0; z < nz; ++z)
+        for (int x = 0; x < nx; ++x) {
+            for (int y = 0; y < ny; ++y) if (see(x, y, z)) break;
+            for (int y = ny - 1; y >= 0; --y) if (see(x, y, z)) break;
+        }
+    for (int y = 0; y < ny; ++y)
+        for (int x = 0; x < nx; ++x) {
+            for (int z = 0; z < nz; ++z) if (see(x, y, z)) break;
+            for (int z = nz - 1; z >= 0; --z) if (see(x, y, z)) break;
+        }
+    if (solid.empty()) return;
+    // The shape's own projected areas (in finest voxels): along x, along z, along y.
+    double area0[3] = {0, 0, 0};
+    {
+        std::vector<uint8_t> px(size_t(ny) * nz, 0), pz(size_t(ny) * nx, 0), py(size_t(nz) * nx, 0);
+        for (const Vox& v : solid) {
+            px[size_t(v.z) * ny + v.y] = 1;
+            pz[size_t(v.y) * nx + v.x] = 1;
+            py[size_t(v.z) * nx + v.x] = 1;
+        }
+        for (uint8_t b : px) area0[0] += b;
+        for (uint8_t b : pz) area0[1] += b;
+        for (uint8_t b : py) area0[2] += b;
+    }
+    for (int k = 1; k < 8; ++k) {
+        const int sz = 1 << k;
+        const std::array<int, 3> e{(nx + sz - 1) / sz, (ny + sz - 1) / sz, (nz + sz - 1) / sz};
+        if (s.mipDims.back()[0] <= 1 && s.mipDims.back()[1] <= 1 && s.mipDims.back()[2] <= 1) break;
+        const size_t n = size_t(e[0]) * size_t(e[1]) * size_t(e[2]);
+        auto cidx = [&](int cx, int cy, int cz) { return (size_t(cz) * size_t(e[1]) + size_t(cy)) * size_t(e[0]) + size_t(cx); };
+        // Coverage: the lines through each block, along each axis, that meet the shape. A line is one finest
+        // row inside one block; mark each once (by its block along the axis), then count marks per block.
+        std::vector<uint8_t> lx(size_t(e[0]) * ny * nz, 0), ly(size_t(e[1]) * nx * nz, 0), lz(size_t(e[2]) * nx * ny, 0);
+        std::vector<float> cover(n, 0.0f);
+        std::vector<uint32_t> count(n, 0);
+        for (const Vox& v : solid) {
+            const int cx = v.x >> k, cy = v.y >> k, cz = v.z >> k;
+            const size_t c = cidx(cx, cy, cz);
+            ++count[c];
+            uint8_t& mx = lx[(size_t(cx) * nz + v.z) * ny + v.y];
+            if (!mx) { mx = 1; cover[c] += 1.0f; }
+            uint8_t& my = ly[(size_t(cy) * nz + v.z) * nx + v.x];
+            if (!my) { my = 1; cover[c] += 1.0f; }
+            uint8_t& mz = lz[(size_t(cz) * ny + v.y) * nx + v.x];
+            if (!mz) { mz = 1; cover[c] += 1.0f; }
+        }
+        const float lines = 3.0f * float(sz) * float(sz), cells = float(sz) * float(sz) * float(sz);
+        // The slot: the one the block's voxels seen from outside show most (by how many sides each is seen
+        // from); a block with none seen, its commonest.
+        std::vector<std::pair<uint32_t, uint8_t>> tally;   // (block, slot)
+        tally.reserve(solid.size());
+        for (const Vox& v : solid) tally.push_back({uint32_t(cidx(v.x >> k, v.y >> k, v.z >> k)), v.slot});
+        std::vector<uint32_t> order0(solid.size());
+        for (size_t i = 0; i < order0.size(); ++i) order0[i] = uint32_t(i);
+        std::sort(order0.begin(), order0.end(), [&](uint32_t a, uint32_t b) { return tally[a] < tally[b]; });
+        std::vector<uint8_t> slotOut(n, 0);
+        std::vector<uint32_t> seenW(n, 0);   // how much of the block is seen from outside
+        for (size_t i = 0; i < order0.size();) {
+            const uint32_t block = tally[order0[i]].first;
+            uint32_t bestW = 0, seenSum = 0;
+            uint8_t best = 0;
+            size_t j = i;
+            while (j < order0.size() && tally[order0[j]].first == block) {
+                const uint8_t sl = tally[order0[j]].second;
+                uint32_t w = 0;
+                size_t r = j;
+                for (; r < order0.size() && tally[order0[r]].first == block && tally[order0[r]].second == sl; ++r) {
+                    w += 1u + 64u * solid[order0[r]].seen;
+                    seenSum += solid[order0[r]].seen;
+                }
+                if (w > bestW) { bestW = w; best = sl; }
+                j = r;
+            }
+            slotOut[block] = best;
+            seenW[block] = seenSum;
+            i = j;
+        }
+        // A block nothing of which is seen from outside (a trunk inside its crown, kept for its coverage while
+        // the sparse leaves round it were not): seen at this level, it shows what is seen there -- the most seen
+        // block next to it, the crown's leaves, not a block of bark in the crown.
+        {
+            const std::vector<uint8_t> own = slotOut;
+            for (int cz = 0; cz < e[2]; ++cz)
+                for (int cy = 0; cy < e[1]; ++cy)
+                    for (int cx = 0; cx < e[0]; ++cx) {
+                        const size_t c = cidx(cx, cy, cz);
+                        if (!count[c] || seenW[c]) continue;
+                        uint32_t most = 0;
+                        for (int dz = -1; dz <= 1; ++dz)
+                            for (int dy = -1; dy <= 1; ++dy)
+                                for (int dx = -1; dx <= 1; ++dx) {
+                                    const int x = cx + dx, y = cy + dy, z = cz + dz;
+                                    if (x < 0 || y < 0 || z < 0 || x >= e[0] || y >= e[1] || z >= e[2]) continue;
+                                    const size_t o = cidx(x, y, z);
+                                    if (seenW[o] > most) { most = seenW[o]; slotOut[c] = own[o]; }
+                                }
+                    }
+        }
+        // Solid in order of coverage (the fuller block first among equals), keeping the count that brings the
+        // projected areas nearest the shape's.
+        std::vector<uint32_t> order;
+        for (size_t c = 0; c < n; ++c)
+            if (count[c]) order.push_back(uint32_t(c));
+        std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+            const float sa = cover[a] / lines + 1e-3f * float(count[a]) / cells, sb = cover[b] / lines + 1e-3f * float(count[b]) / cells;
+            return sa != sb ? sa > sb : a < b;
+        });
+        std::vector<uint16_t> qx(size_t(e[1]) * e[2], 0), qz(size_t(e[1]) * e[0], 0), qy(size_t(e[2]) * e[0], 0);
+        double area[3] = {0, 0, 0};
+        const double cellArea = double(sz) * double(sz);
+        double bestErr = 1e30;
+        size_t bestCount = 0;
+        for (size_t i = 0; i < order.size(); ++i) {
+            const uint32_t c = order[i];
+            const int cx = int(c % uint32_t(e[0])), cy = int((c / uint32_t(e[0])) % uint32_t(e[1])), cz = int(c / (uint32_t(e[0]) * uint32_t(e[1])));
+            if (qx[size_t(cz) * e[1] + cy]++ == 0) area[0] += cellArea;
+            if (qz[size_t(cy) * e[0] + cx]++ == 0) area[1] += cellArea;
+            if (qy[size_t(cz) * e[0] + cx]++ == 0) area[2] += cellArea;
+            const double err = std::abs(area[0] / area0[0] - 1.0) + std::abs(area[1] / area0[1] - 1.0) +
+                               0.5 * std::abs(area[2] / area0[2] - 1.0);
+            if (err < bestErr) { bestErr = err; bestCount = i + 1; }
+            if (area[0] > 1.5 * area0[0] && area[1] > 1.5 * area0[1]) break;   // only worse from here
+        }
+        std::vector<uint8_t> out(n, 0);
+        for (size_t i = 0; i < bestCount; ++i) out[order[i]] = slotOut[order[i]];
         s.mip.push_back(std::move(out));
         s.mipDims.push_back(e);
     }
@@ -328,8 +447,8 @@ inline PropInstance looseInstance(const ShapeLibrary& lib, const Placement& p) {
 }
 
 // Stamps `p` into the voxels of a ring of voxel `v` inside [x0, x0 + c) x [z0, z0 + c): `write(i, j, y, slot)`
-// with i, j the column's voxel and y the ring's voxel row. A ring voxel takes the shape's slot when at least
-// a quarter of the shape's voxels inside it are solid (the centre alone where the shape is the coarser).
+// with i, j the column's voxel and y the ring's voxel row. A ring voxel takes the slot of the shape's pyramid
+// level nearest the ring's voxel at its centre (buildMips: each level covers what the shape covers).
 template <typename Write>
 inline void stampPlacement(const ShapeLibrary& lib, const Placement& p, double v, double x0, double z0, double c, Write&& write) {
     const Shape& s = lib.shapes[size_t(p.shape)];

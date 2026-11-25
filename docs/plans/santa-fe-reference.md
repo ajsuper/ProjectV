@@ -1,6 +1,6 @@
 # Santa Fe: a quality reference
 
-Status: **in progress**, 2026-11-23: S0-S2 built, S3 first pass, S4 optimized mode, S5 game scale + placements + character, S6 upscaler + boulders, S7 rock as boulders + generation speed, S8 relief everywhere + scale 1.5, S9 gentler cirques + living rock, S10 blocky distance, S11 stable reconstruction + shadow blur + clouds as their own pass, S12 soft quarter-res glow + blocky style, S13 box clouds rebuilt like voxels + tunable glow, S14 cloud-shadow map, S15 normals group + separate blocky toggles, S16 atmosphere: leaf SSS, motes, light shafts, S17 leaf light + traced AO, S18 cheaper shadows and AO, leaf glow only through one layer, S19 meadows, flowers, snow on trees, S20 glints, sticks, clumps. A new example, `examples/56-santa-fe` (target `santa_fe`), forked from
+Status: **in progress**, 2026-11-23: S0-S2 built, S3 first pass, S4 optimized mode, S5 game scale + placements + character, S6 upscaler + boulders, S7 rock as boulders + generation speed, S8 relief everywhere + scale 1.5, S9 gentler cirques + living rock, S10 blocky distance, S11 stable reconstruction + shadow blur + clouds as their own pass, S12 soft quarter-res glow + blocky style, S13 box clouds rebuilt like voxels + tunable glow, S14 cloud-shadow map, S15 normals group + separate blocky toggles, S16 atmosphere: leaf SSS, motes, light shafts, S17 leaf light + traced AO, S18 cheaper shadows and AO, leaf glow only through one layer, S19 meadows, flowers, snow on trees, S20 glints, sticks, clumps, S21 glints as a grid of mirrors, sheen, screen-space reflections, S22 a clean image: no history on surfaces, upscale per layer, S23 the sky in the render: clouds that darken, fog and cloud settings, weather, S24 rendering polish: bloom, clouds, tone, S25 light and colour calibrated, S26 faster (14.3 -> 12.3 ms), S27 trees that match at every distance (coarse levels by area, far crowns from the same trees), the sky not traced. A new example, `examples/56-santa-fe` (target `santa_fe`), forked from
 `55-mountains` (its working tree as of 2026-11-23, M4a props included). `55-mountains` is left as it is.
 
 The user, on `55-mountains`: it feels flat, uninteresting and undetailed. Make it far better looking, with
@@ -364,9 +364,400 @@ finest rings; more tufts, chamisa and snakeweed.
     still) holds one tiny mirror tilted at random within ~20 degrees of the surface; it flashes the sun
     (x30) when it lies within ~3 degrees of the half vector (sharpness 0.9985). Snow every cell, granite and
     gneiss (metallic, no gloss) 35%, snow on the trees too; out to 300 m; with the sun's light, so shadowed and
-    blurred with it; the glow pass blooms it. Panel: Surfaces, sun glints / brightness / sharpness;
-    `SANTA_FE_GLINT=bright,sharp`.
+    blurred with it; the glow pass blooms it. **Replaced by S21** (its sliders and `SANTA_FE_GLINT` are gone).
   - **Sticks and logs**: small log shapes (0.7-1.7 m, deadwood and bark) placed every 3.75 m under any trees
     (0.045 per m2 x cover); logs twice as common (0.004) and in the pinon-juniper too (silver deadwood, 2-4.5 m).
   - **Trees in clumps**: anywhere in their cell (0.1-0.9 spaced them like an orchard), kept by 0.35-1.65 x the
     cover from a 40 m noise (about 1 on average: the far field's cover still agrees).
+
+- **S21** (2026-11-23): glints and sheen, reworked -- the user: S20's glints were not good. Wanted: a 16 x 16 grid
+  where small squares or sections are glossy, actually reflecting the sun with a screen-space reflection and much
+  less glow; snow, rocks and leaves a subtle rough (specular-diffuse) screen-space reflection of the sky. All at
+  render time, nothing stored, tunable in the shaders.
+
+  | # | Decision | Why |
+  |---|---|---|
+  | S21a | **The grid is per voxel face**, in its chunk's frame, from where the ray meets the face: 16 x 16 cells. A cell is a mirror alone (snow 4%, rock 1.5%) or as most (55%) of a mirror section of 4 x 4 cells (snow 5%, rock 3%), which flash together | The user's choice: it scales with the voxel and holds still; sections are the "sections" |
+  | S21b | **A mirror shows the sun through the sun's shadow ray**, as a disc 1.2 degrees across (the mirrors are not flat) at the sky's own disc radiance (40 x), times its Fresnel (ice 0.03, mica 0.06), **held under the glow's threshold** (1.8 exposed; the glow starts at 2) | A reflected ray toward the sun meets exactly what the sun's shadow ray met, on or off the screen; the cap is "much less glow" |
+  | S21c | **What else it reflects, and the sheen, through `reflect.frag`**: the trace pass writes the ray (gGloss, an eighth target: direction, weight) -- the mirror's, or one GGX direction a frame for the sheen; reflect.frag marches it through this frame's gPos and reads last frame's image where it hits, last frame's sky where the screen shows sky in that direction, the analytic sky past the screen; shadow_soft adds it | Screen space, as asked; the sky fallback (the user's choice) because the screen rarely holds what a ray reflects off it |
+  | S21d | **Sheen**: snow 0.22, rock 0.12, leaves 0.08, GGX roughness 0.5 / 0.6 / 0.55, a rough Fresnel (at grazing up to 1 - roughness, not 1) | Snow > rock > leaves (the user). The first try (0.6 / 0.35 / 0.25, roughness 0.35-0.5, plain Schlick) mirrored the clouds in the snow at grazing views |
+  | S21f | **A rock's shine is its palette glossiness**: the boulders' roles carry their brush's (granite 0.12, slate 0.45, quartzite 0.5, quartz 0.75, mica 0.8, pyrite 0.85; capped at 0.88, under water's 0.9), the terrain's granite 0.15, gneiss 0.3, basalt 0.2, lichen 0.04. Dull rock (shine 0) to shiny (`SF_ROCK_SHINY` 0.6 and up): sheen 0.2 -> 0.9, roughness 0.6 -> 0.25, glint cells 2% -> 12%, sections 3% -> 20%, F0 0.06 -> 0.15. Leaves' sheen 0.2. The renderer tells water (glossiness over 0.9), snow (drawn 0.78 smooth, a little gloss) and rock (drawn fully smooth, or any other glossy entry) apart explicitly | The user: leaves stronger, rock much stronger -- really strong on some rock, a little on the rest. The boulders had been interned with their colour only (no glints or sheen on them at all), and their smoothing byte stays 0 so they are not drawn rounder |
+  | S21e | **The tunables are defines** at the top of trace.frag (`SF_GLINT_*`, `SF_SHEEN_*`) and reflect.frag (`SF_SSR_*`); the panel keeps only the on/off switches (sun glints; gloss, now water and sheen) | The user: tunable in the shaders |
+
+  As built: reflect.frag costs 0.13 ms at Baldy (13.2 ms GPU in all). Water keeps its own mirror (the gloss path,
+  now water only); snow's old soft sheen there is replaced by S21d. Adding gGloss shifts the samplers of every
+  pass that reads the trace's targets and more after them (ao_trace, clouds, shadow_soft, resolve).
+  Open: the sun glints have not been seen in a sunlit view yet -- the user to judge them; the sheen brings out the
+  snow's terrace risers as faint contours at grazing views.
+
+- **S22** (2026-11-24): a clean image -- the user: the reliance on temporal upscaling, antialiasing and
+  denoising is far too prevalent and the image feels unclean; for a voxel look a clean image matters a great deal.
+  Today every frame is a half-resolution trace jittered over 16 points, with one random sample each for the
+  sun's disc, the diffuse ray, the fog, the cloud march and the sheen, and the resolve averages them over up to
+  4096 still frames (12 moving); the traced AO and the clouds keep histories of their own. Only the
+  reconstruction (the voxel coverage upscale) is spatial.
+
+  | # | Decision | Why |
+  |---|---|---|
+  | S22a | **Surfaces keep no history.** The resolve's history is kept only where the pixel shows cloud or sky; the camera jitter is off unless the temporal upscale is chosen (S22b). Reference mode keeps today's accumulation | The user's choice: only clouds and sky; marching clouds clean in one frame costs too much |
+  | S22b | **The upscale is chosen per layer.** The frame is composited after the upscale, at window resolution, from layers: the base (albedo x the sky light, emission), the sun (its light), the sun's visibility, the traced AO, the SSAO, the reflections, the clouds. Each layer has an upscale setting: *reconstruct* (the voxel coverage weights), *spatial* (edge-aware, guided by the full-resolution depth and normal the reconstruction writes), *temporal* (jittered, history). Panel: Upscale, one row per layer | The user: settings to toggle reconstruction vs temporal vs spatial per effect, to dictate how reflections, AO and the rest are upscaled. Today the composite happens before the upscale, so one method serves all |
+  | S22c | **Shadows are deterministic, at window resolution, filtered with an A-Trous blur.** A shadow pass at the window's resolution: each pixel's point is its ray against the voxel face the reconstruction chose (exact, no second primary trace), one hard ray to the sun's centre, its blocker distance; then an A-Trous filter (4-5 iterations, stopping at depth, normal and plane) whose radius the blocker distance sets (PCSS, as S11). The sun's disc sampling becomes reference-mode only | The user: no temporal at all, fully deterministic at high resolution with an A-Trous blur |
+  | S22d | **The traced AO: fixed rays, a spatial denoise, held per voxel face.** Each texel's rays come from a fixed stratified set indexed by its place on its face (the same every frame); an A-Trous filter over the trace's texels (a broad radius: it is the large-scale term); then each face takes the filtered value at its centre, so every pixel of a face agrees. **The SSAO is per pixel**, at window resolution, after the upscale, a fixed kernel | The user: the AO per face is fine as long as the SSAO is per pixel; the ray-based AO spatially denoised because it is concerned with a broader scale |
+  | S22e | **The sheen reflects the sun and the sky only.** The sun as an analytic GGX lobe times the sun's visibility; the sky along the reflected direction from this frame's sky and clouds, blurred by the roughness, where that direction is on the screen and shows sky; otherwise one or two fixed rays in the lobe against the analytic sky and the cloud-shadow map. No per-frame GGX sample and no march through the screen for the sheen. The glints (S21a/b) keep their mirror ray through reflect.frag, which was never random | The user: the sheen can be simpler, only the lights (sun, sky), a blurred screen space when it can, one or two rays when it can't |
+  | S22f | **Optimized mode has no random samples on surfaces.** The fog's sample point is fixed (an analytic in-scatter over the segment), the leaf-spread and shadow-blur disks are fixed patterns; only the cloud march stays jittered (the clouds keep their history, S22a) | Anything random per frame needs the history this removes |
+
+  Milestones:
+
+  | # | What | Done when |
+  |---|---|---|
+  | M1 | The layered composite after the upscale; the reconstruction writes full-resolution depth and normal and upscales the layers set to *reconstruct* with its weights; *spatial* (joint bilateral) and *temporal* (today's resolve, per layer) for the rest; the jitter off by default; the resolve's history on cloud and sky pixels only; the Upscale panel | A still image with every layer on *reconstruct* matches today's single frame; moving shows no smear on surfaces; the cost written down |
+  | M2 | The window-resolution shadow pass and its A-Trous filter (S22c) | Shadow edges stable and clean while moving; penumbrae widen with blocker distance; cost written down |
+  | M3 | The traced AO's fixed rays, A-Trous, per-face hold; the SSAO at window resolution (S22d) | No AO crawl while moving; contact creases per pixel |
+  | M4 | The sheen from the sun and the sky (S22e) | Snow, rock and leaves sheen without noise; the glints as before |
+  | M5 | The fog and the remaining fixed patterns (S22f); captures and the user's judgement | No surface noise in optimized mode with history off; frame time against S21's 12 ms |
+
+  As built (all five at once, the user: "do all of these asap"):
+  - **The layers** (shadow_soft.frag, now the split, at the trace's resolution): 0 the colour without the sun, a
+    the sky light's share; 1 the sun's light, a the leaf glow's extra visibility (sfLeafSpread, still worked out
+    here); 2 reflect.frag's light, a the hard visibility; 3 blocker distance, depth, motion. A blocky-style cloud
+    box is composited here whole and marked (a -1). The clouds are composited in resolve.frag now, per window
+    pixel against the window-resolution depth.
+  - **The reconstruction** sums every layer through one set of weights: a first loop finds the voxels as before,
+    a second gives each texel its share (its voxel's coverage x its weight, plus the background's); per layer
+    (sfUpscale) the spatial filter instead -- the bilinear tent held to the front voxel's depth. It writes the
+    front face (centre, edge) and the normal and depth at the window's resolution. 0.44 -> 1.3-1.6 ms.
+  - **Shadows, S22c changed**: no second shadow ray at the window's resolution. The trace's shadow ray already
+    starts at the voxel face's centre, so every texel of a face gets one answer and a window-resolution ray per
+    face would give the same one; the reconstruction rebuilds it with the voxels' edges. shadow_prep.frag
+    (blocker search, 16 taps over 24 pixels, the penumbra in pixels) then shadow_atrous1/2/4/8 (5 x 5 B3, plane
+    and normal stops, each step gated off where its taps would reach past the penumbra). ~0.6-0.8 ms.
+  - **AO**: ao_trace's two rays a texel, their directions from a world cell about a texel across (a power of
+    two); no history. ao_atrous1/2/4 at its quarter resolution (~0.1 ms). resolve.frag reads it where the
+    pixel's face centre is on the screen (if the depth there is that face's) or at the pixel; the SSAO is per
+    window pixel, 16 taps on a fixed spiral (no rotation: nothing to average).
+  - **Sheen**: the mirror direction, the roughness in gGloss's length (1 + alpha; 1 a glint); the sun's highlight
+    an exact GGX lobe in the trace (SF_SHEEN_SUN), under the glints' cap. reflect.frag: the analytic sky, this
+    frame's clouds blurred by the roughness (9 taps over SF_SHEEN_BLUR_PIXELS x alpha) where the screen shows the
+    direction, two sky directions of the lobe past it. Reflections are darkened by the AO.
+  - **Glints, prefiltered** (not planned): without the jitter and the history, cells smaller than a texel
+    aliased into sparkle across distant snow. The grid is now taken at the level whose cells are about a texel
+    (up to 16 x 16 merged); a merged cell is a mirror if any of its cells would be, as bright as its mirror
+    share: the same light, stable.
+  - **Clouds**: their own history is the one left; a still view blends 4% a frame (was 12%: the resolve's
+    long history had been hiding their noise), a moving one 12%.
+  - **The panel**: Upscale -- colour, sun, reflections, shadow (reconstruct / spatial / temporal), the shadow
+    filter, the traced AO (per face / spatial / temporal), the AO filter. Optimized mode: all reconstruct, per
+    face, both filters, no jitter. Reference mode: colour temporal (its sun disc and diffuse ray ride in it),
+    the jitter on. "shadow blur" is now "sun apart": the sun out of the colour, which the filter needs.
+  - **Cost**: 15.2 ms GPU at Atalaya, 13.4 at Baldy (13.2 before, S21).
+  - **Taken back a step** (the user, after seeing it: far less clean without the history): optimized mode puts
+    the colour, the sun and the reflections back through the voxel reconstruction and the temporal resolve (the
+    jitter on), as before S22; the shadow keeps its A-Trous filter and the AO its fixed rays and filter, both
+    deterministic, and the traced AO is per pixel (spatial), not per face. The settings stay in the panel.
+  - **A reconstruction fix**: where the two loops disagreed on a texel at an edge between two voxels (one the
+    first loop gave next to nothing, or counted under another layer), its share divided by a sum it was not
+    in and blew up into bright squares. Each share is now at most its layer's whole and the shares are
+    normalised: an edge reconstructs a little over, never into a flare. (The old single-loop version
+    normalised each layer by its own sum and could not do this.)
+  - **Flicker under movement** (the user: a lot of temporal instability; restir-pt's upscaler looks flawless --
+    take more from it). The reconstruction was already restir-pt's; the resolve now follows restir-pt's rule for
+    rule: the motion of the nearest surface in the 3 x 3 pixels round (no trails or flicker along silhouettes);
+    a pixel counts as moved when its own motion is over a hundredth of a pixel; the clamp over the full 3 x 3
+    neighbourhood (S22's first cut clamped to a cross of 5, too tight a box: the history snapped to each
+    jittered frame); still history 64 frames (4096 only where random samples need converging: reference mode),
+    moving 16 (was 12); what a moving thing uncovers clamped and cut to 4. And a merged glint cell is now about
+    two texels, not one (the jitter moved a texel's sample between neighbouring cells each frame).
+  - **Cloud edges flickered** (the user found it: voxel edges against the clouds, not against the sky or other
+    voxels). The clouds were composited after the history, per window pixel, by a hard depth test: a
+    silhouette's pixel flipped between the voxel's depth and the sky's as the jitter moved, so the cloud
+    switched fully on and off there each frame. They are put on at the trace's resolution again, in
+    shadow_soft.frag, before the reconstruction (each layer through what they let through, their light in the
+    colour): the edge is reconstructed and accumulated like any other colour.
+  - **AO in the distance** (the user: reference looks better, mostly in its distant voxels; its diffuse ray
+    occludes at every distance). The traced AO stopped at 300 m, its 6 m rays were under a pixel a kilometre
+    out, and the SSAO turned itself off once its 0.4 m was under 1.5 pixels. Now: out to 3 km (faded over the
+    last fifth), its reach the larger of 6 m and 1.2% of the distance (SF_AO_REACH_PER_M), and the SSAO at
+    least 4 pixels across (SF_SSAO_MIN_PIXELS).
+  - **AO on the far field** (the user: distant hills still flat -- the far field past the voxel rings had no
+    AO at all: its sky-light share is 0 and no AO ray reaches it). A horizon AO on the heightfield, in the trace,
+    no rays: 6 directions, in each the highest the ground plus 0.7 of its canopy rises above the point's tangent
+    plane at 3 distances (from the larger of 20 m and four pixels' ground, x3 each), the sky over that horizon
+    averaged (`sfFarAO`, SF_FAR_AO_*). Off with the diffuse ray (reference mode occludes by tracing). ~0.2 ms.
+    Its own switch, SF2_FAR_AO (panel: Sky light and AO, "AO on the far field").
+  - **The sky light from the whole sky** (the user: in reference the cloud shadows are much brighter and coloured
+    by the clouds and the sky -- the diffuse blue sky light the path trace had). With no diffuse ray a surface's
+    sky light was the analytic sky in ONE direction (over its normal, toward the zenith: the darkest blue of it)
+    x 0.8, no clouds, no ground. sky_ambient.frag now takes the hemisphere's cosine-weighted mean once a frame
+    as an ambient cube (6 texels, 128 fixed directions each, what a diffuse ray that leaves the scene sees: the
+    sky, the clouds' light at their layer -- the trace's own sfCloudSky --, the plains below), and the trace
+    weighs it by the normal (sfSkyAmbient, SF_SKY_LIGHT 1.0). Snow in a cloud's shadow at Baldy went from deep
+    blue to within a little of reference's. 0.3 ms. Switch SF2_SKY_LIGHT ("sky light from the whole sky").
+  Open: the user's judgement of the look while moving; the reconstruction's cost (four layers through one
+  weight loop, 1.6 ms at Atalaya) is the largest new item.
+
+- **S23** (2026-11-24): the sky in the render, and clouds and fog set up as production systems
+  do -- the user: a step in the right direction, but the sky needs more integration: clouds turned to full
+  coverage, huge and low, should feel very dark, and came out bright (correctly diffuse, but bright). And more fog
+  settings, following how other cloud and fog systems work.
+
+  Why it stays bright: three places still light the scene as if the sky were clear.
+  (1) The sky light's cube (S22) sees the clouds through sfCloudSky -- a fixed grey (the sun's light x 0.12-0.22
+  plus the clear zenith x 0.6) at most 85% opaque, whatever the deck's thickness. (2) The clouds' own ambient
+  (sfCloudLight) is the clear zenith from above and the SUNLIT ground from below (groundUp), so a deck in its
+  own shadow keeps clear-day fill. (3) The haze's in-scatter (skyUp x 0.75 + groundUp x 0.5) and the air's
+  (mtnAtmosphere: the sun unshadowed) ignore the clouds.
+
+  How others do it (sources: Epic's Exponential Height Fog and Volumetric Cloud references; Schneider, "The
+  Real-time Volumetric Cloudscapes of Horizon Zero Dawn" 2015 and "Nubis" 2017; Hillaire, Frostbite 2016):
+  - Unreal's height fog: density, height falloff, a second layer (density, falloff, offset), inscattering
+    colour, sky-atmosphere ambient contribution, directional inscattering (exponent, start distance, colour),
+    start distance, max opacity, cutoff distance; volumetric fog: scattering distribution (phase g), albedo,
+    extinction scale, emissive, view distance.
+  - Unreal's volumetric clouds: layer bottom and height, tracing distances, "sky light cloud bottom occlusion"
+    (the sky light darkened under the layer: a cheap stand-in for clouds occluding it -- exactly (1)), "ground
+    contribution" (the shadowed ground lighting the cloud from below -- (2)), aerial perspective start and fade
+    on clouds; the material's phase G, G2 and blend, multi-scattering contribution / occlusion / eccentricity
+    (our octaves' 0.5 / 0.5 / 0.5, hard-coded), octave count.
+  - Nubis: a weather map -- coverage, cloud TYPE (stratus .. cumulus .. cumulonimbus: the height profile) and
+    precipitation (denser, darker rain clouds); art-directable, several types at once.
+
+  | # | Decision | Why |
+  |---|---|---|
+  | S23a | **The sky light sees the real clouds**: sky_ambient.frag marches each of its directions through the volumetric layer (sfCloudMarch, fewer steps), spread over a 64 x 6 target and averaged by a second tiny pass | A thick deck's base is dark and opaque; the stand-in was a fixed grey |
+  | S23b | **Overcast reaches every light**: one number a frame, the sun's mean transmittance through the clouds round the camera (the cloud-shadow map, sampled over ~10 km), dims the ground's bounce (groundUp) everywhere -- the clouds' fill from below, the haze, the cube's lower half; the clouds' fill from above is the sky as seen under them (the cube, not the clear zenith) below their middle -- Unreal's "cloud bottom occlusion" | One deck shades the land, so the land throws less light up; the clouds' undersides then darken as they should |
+  | S23c | **The haze and the air under the clouds**: the haze's sky in-scatter from the cube; its sun in-scatter and the air's (aerial perspective) times the cloud shadow along the view (at the camera and at the far end, mixed) | Under overcast, distant hills should not glow with clear-day haze |
+  | S23d | **Fog settings after Unreal's height fog**: density, height falloff (scale height), base, a second layer (density, falloff, offset), inscattering tint, sky contribution, directional inscattering (strength, exponent / phase g, start distance), start distance, max opacity; albedo | The user: more fog settings, as others have them |
+  | S23e | **Cloud settings after Unreal and Nubis**: phase G, G2 and blend; multi-scattering contribution, occlusion, eccentricity (now hard-coded 0.5) and octaves; ambient strength; ground contribution; cloud-bottom occlusion; powder; cloud type (stratus .. cumulus .. cumulonimbus height profile) and precipitation (darker, denser) -- global, not yet a weather map | The same; type and precipitation are what make a storm read as a storm |
+  | S23f | **Weather presets**: clear, scattered, overcast, storm -- each a set of the above | Quick to reach a believable dark sky |
+
+  Milestones: M1 S23a-c (the overcast darkens: a full low deck reads dark, captures against the user's);
+  M2 S23d (fog panel); M3 S23e (cloud panel); M4 S23f (presets). Cost: the cube's march ~0.3 -> ~0.6 ms
+  expected; the rest is uniforms.
+  As built (all four, the user: "do all 4"):
+  - **The sky's light on the GPU, read back** (S23a/b): sky_dirs.frag (64 x 7: 64 fixed directions round each of
+    six axes, each the volumetric clouds marched (sfCloudMarch, half the steps) then the sky, or the land below in
+    the clouds' shadow there; row 6 the clouds' shadow at 64 points within 9 km) and sky_ambient.frag (the rows
+    averaged, 8 x 1: texels 0-5 the ambient cube, 6 the land's mean sun transmittance). The passes that need it
+    bind it and define SF_SKY_TEX_SLOT before mountains_sky.sc (the trace, clouds.frag, reflect.frag, sky_dirs
+    itself a frame late); the rest see the clear sky. clouds.frag had no slot left: it now reads the trace's
+    gPos and gNormal through fbo 17 (those two alone) instead of all eight. 0.15-0.25 ms. First built as a
+    readback to uniforms -- the user: a lag spike every ~10 frames, unplayable: bgfx's Vulkan readTexture
+    kick(true)s, waiting for the GPU to go idle, and it ran every fifth frame.
+  - **Every light under the clouds**: mtnGroundUp() (mountains_sky.sc) is the land's light thrown up -- the sun
+    on it times the overcast, plus the sky's light on it (the cube overhead); the clouds' fill from below, the
+    trace's, the plains in mtnSkyFrom and skyColor all use it. The air's own light (aerial perspective, the
+    diffuse ray's distance) is dimmed by mtnAirLit(): sfOvercast.y (0.6, "air under clouds") of the overcast.
+  - **Overcast decks came out navy at first**: the bases' fill read the cube, which sees the dark deck -- a loop
+    that converged to night -- and deep in a thick deck the octaves' exponentials are zero. Now the bases' sky
+    fill is the clear sky through the deck above by the two-stream diffusion, 1 / (1 + 0.75 (1 - g) tau) (g 0.85,
+    tau along the light march), weighted by "bottom occlusion"; and the same diffusion, minus what the octaves
+    carry, adds sunlight leaving the cloud as from a diffusing sheet (t E / pi). Grey, not black.
+  - **Fog** (S23d, trace.frag): two exponential layers (the valley haze + sfFog2), a start distance, a max
+    opacity; its sky light from the cube (up 0.75, down 0.5, x "fog sky light"), the sun scattered by its phase
+    (4 pi HG, mtnFog.w) where the clouds let it at mid-view ("fog sun light", Unreal's directional inscattering),
+    through a tint and an albedo. Panel: Air and haze, "height fog (Unreal)".
+  - **Clouds** (S23e, santa_fe_clouds.sc): phase G / G2 / blend and powder (sfCloudPhase); multi-scattering
+    contribution / occlusion / eccentricity / octaves (sfCloudMS; the old hard-coded 0.5 / 0.5 / 0.5, 3); ambient,
+    ground contribution, bottom occlusion, precipitation (sfCloudAmb: rain is 1.8x denser, its sun light x0.5 and
+    fill x0.4); type and erosion (sfCloudType: 0 stratus -- towers cut to 0.22 of the layer, a soft base and top,
+    the billows flattened into a sheet --, 0.5 cumulus as before, 1 cumulonimbus -- every tower to the top, +0.2
+    cover). Panel: Clouds, "kind (Nubis)" and "light (Unreal's volumetric clouds)".
+  - **Weather** (S23f): clear (cover -0.6, thinner haze), scattered (the defaults), overcast (cover 0.55, 3.3-5.6
+    km, extinction 0.04, stratus 0.15, drizzle 0.25, haze x2.4 and a second layer), storm (cover 0.85, 3-11.5 km,
+    0.1, cumulonimbus 0.95, rain 0.85, haze x5, a deep second layer, no sun in the fog, a cool tint). Panel
+    buttons by the mode buttons; SANTA_FE_WEATHER=clear|scattered|overcast|storm for captures.
+  - **Cost**: 15.1-15.6 ms GPU at Atalaya in all four (the clouds cost less as the deck closes).
+  Open: whether the type and precipitation want a weather map (Nubis) after all -- several kinds of cloud in
+  one sky -- rather than one global setting; a storm's bright sun disc still shows through the deck in the sky
+  view (the disc is drawn regardless of the clouds' transmittance there).
+
+- **S24** (2026-11-24): rendering polish -- the user: the cloud and sun bloom look very poor; the clouds could
+  take a spatial denoise instead of a temporal one; the sheen's reflections flicker under movement (the fixed
+  rays change), maybe back to random. Then, after a first cut: research how AAA games render realistic clouds in
+  real time and take from it.
+
+  Research (sources in the conversation; Horizon's 2015 speaker notes read in full, the rest from abstracts and
+  Unreal's reference):
+  - Horizon Zero Dawn (Schneider and Vos 2015): Beer's law x Henyey-Greenstein (the silver lining) x a "powdered
+    sugar" term (dark edges facing the light, view dependent: it fades across the view relative to the sun) x more
+    absorption in rain clouds. Light: 6 samples in a cone toward the sun -- the cone smooths banding and blends
+    neighbouring densities, "a nice ambient effect" -- the last far out, for shadows cast by distant clouds; cheap
+    density once the ray's opacity passes 0.3 (2x faster). Colour: ambient sky light growing with height, direct
+    the sun's colour, then toward the atmosphere by depth. 64-128 march steps; ~20 ms whole, ~2 ms by updating 1
+    pixel in 16 of a quarter-resolution buffer a frame, the last frame reprojected.
+  - Nubis (2017, 2022): weather map with type and precipitation; temporally upscaled skies (2022 adds a
+    non-temporal path for clouds the camera flies through).
+  - Unreal: half/quarter-resolution tracing, temporal reconstruction, octaves, two lobes, bottom occlusion,
+    ground contribution (S23 has these settings).
+  - Red Dead Redemption 2 (Bauer 2019): a world cloud map from the weather, a table of height gradients per type,
+    a 2D cirrus layer, raymarched scattering and transmittance.
+  - jpgrenier (Stingray, 2016): 256 steps with a Bayer offset over 16 frames; ambient from the sky sampled at a
+    bottom and a top altitude; bases darkened by absorption altitude; high-frequency detail sells scale and needs
+    samples.
+
+  | # | Decision | Why |
+  |---|---|---|
+  | S24a | **Bloom: restir-pt's chain** (bloom.sc: five levels down, Jimenez's 13 taps, Karis-weighted first; four up; mixed in at 4%, no threshold). glow.frag keeps only the light shafts | The threshold glow put a smudged halo round every sunlit cloud |
+  | S24b | **The sheen samples its GGX lobe again**, a direction a frame; the reflections layer's history averages it; reflect.frag's blur by roughness 48 -> 12 pixels | The user: the fixed mirror direction flickered as the jitter moved the smoothed normal under it |
+  | S24c | **Clouds temporal again, as everyone does it**: the march's offset turned per frame (interleaved gradient noise + the frame); a pass of its own (cloud_temporal.frag) reprojects last frame's at the cloud's distance and clips it to this frame's 3 x 3 neighbourhood (mean +- 1.25 sigma: variance clipping), blends 4% still, 15% moving | Tried spatial first (the user's ask): at a quarter of the resolution a filter can only blur -- the capture was soft blobs. Every system surveyed amortises the march over frames |
+  | S24d | **Light in a cone, plus one long sample** (Horizon): the light march's samples spread round the sun's direction by a fixed kernel, widening with distance; one more ~3 km out (cheap density) for distant clouds' shadows | Smoother self-shadowing, the ambient blend, and shadows between clouds |
+  | S24e | **View-dependent powder and in-scattering**: powder fades to nothing looking toward the sun; the multiple-scattering octaves times an in-scattering probability by depth in the cloud and height in the layer (thin edges and bases gather less), the single scattering not | Dark edges and bases, bright crevices: what reads as volume |
+  | S24f | **More march steps** (optimized 28 -> 40) now the frames share them | Detail |
+  | S24g | **A longer tone shoulder for Santa Fe** (display.frag): identity to 0.5, then Reinhard on the peak channel (slope 1 at the knee), hue kept; the engine's Khronos Neutral shoulder (0.76 -> 1) put everything over ~3x white at 0.97-1 | Sunlit clouds near the sun flattened to one cream |
+
+  As built: all seven. The first cut of S24c was spatial (cloud_atrous.sc, three A-Trous steps, no history): its
+  capture was soft and detail-less; replaced by cloud_temporal.frag (fbo 29, read by reflect.frag and
+  shadow_soft.frag). The vertical in-scattering term is a cumulus' (a heap's flat base sees little of its body);
+  it fades out toward stratus (type 0), whose base is where the deck's diffused light comes out. Seen: toward the
+  sun the cumulus now have grey shaded undersides and inner structure, crisp edges, and the sun a soft glow; the
+  overcast preset reads as a grey deck but darker than S23's (the cone and the long sample find more cloud toward
+  the sun, so less diffuses through) -- the user to judge. GPU 15.9 ms looking into the sun (clouds 0.75,
+  cloud_temporal 0.02).
+
+- **S25** (2026-11-24): light and colour, measured -- the user: colours and brightness are 100% off; look at the
+  colour spaces, the tone mapping, the exposure, and the lighting on the clouds and the sky against the ground.
+
+  The colour spaces were right (palette colours decoded from sRGB in the engine, the far field's in
+  mountains_far.sc, all shading linear, sRGB out). So the light was measured: SANTA_FE_RAW=1 shows the scene's
+  linear light x exposure with nothing else, captured at exposure 0.25 and read back to exposure-1 luminance.
+  With the sun behind the camera: sunlit cumulus 0.34 against sunlit dirt 0.33 (a thick cloud reflects ~80% like
+  a white surface: ~3x the dirt), the blue sky at 60 degrees up 0.11 (real ~0.6-1x the dirt), a shaded conifer
+  0.010 (right, for dark foliage under that sky).
+
+  | # | Change | Why |
+  |---|---|---|
+  | S25a | **The aerosol 0.15 -> 40** (air haze; slider to 150): ~0.03 optical depth over Santa Fe | 0.15 was an optical depth of ~0.0005, a hundredth of high-desert air: a navy zenith, no white horizon, no glow round the sun, no blue in the far ridges |
+  | S25b | **The sky's multiple scattering 0.8 -> 1.6** (mtnAtmos.w) | The rest of the zenith's shortfall |
+  | S25c | **The clouds' multiple scattering 0.5 / 0.5 / 0.5, 3 octaves -> 0.8 / 0.35 / 0.6, 5; brightness 0.75 -> 1.0** | Integrated by hand, the old octaves sent ~7% of the sun back toward a viewer with the sun behind, a real deck ~25%. Stronger octaves would make thin wisps glow; S24e's in-scattering probability keeps them to the thick parts |
+  | S25d | **The grade to almost nothing**: contrast 1.2 -> 1.0, saturation 1.25 -> 1.0, vibrance 0.4 -> 0.15 | colour-convention.md: a look is an explicit, light choice on top of a faithful image; this one doubled every error under it (the mustard grass, the navy sky) |
+
+  Measured again (sun behind): the clouds 0.64 (2x the dirt), the sky 0.12 at 60 degrees, 0.31 lower down.
+  Seen: white cumulus over a lighter sky, earthy ground and natural greens; into the sun a hazy glow (perhaps a
+  little pale near the sun); overcast a bright grey day, storm dark. The tone curve stays S24g's. Left: the sun's
+  disc still shows through a deck (it is 40x the sun's light; a few percent of transmittance is a white dot).
+
+- **S26** (2026-11-24): faster -- the user: looks great, make it faster.
+
+  Measured with `SANTA_FE_BENCH=preset` (new: the optimized preset alone, 300 frames after 30, and its passes;
+  repeats to +-0.05 ms where the old 8-frame window wandered +-0.7), plaza, 1600 x 900, RTX 3070: **14.3 -> 12.3 ms
+  GPU**. Before: the trace 7.3 (its primary march ~5, the sun's ray 1.6; every shading feature together under 0.2,
+  measured by compiling them all out), reconstruct 1.65, ao_trace 0.7, depth_pre 0.6, clouds 0.55, resolve 0.45.
+
+  | # | Change | Saves |
+  |---|---|---|
+  | S26a | **The reconstruction learns each tap once**: its first loop keeps each tap's weight and which voxel layer it joined (layers keep the id they were made with as the sort moves them), the second only reads the layers -- it worked every voxel out again (gNormal, gRot, the coverage) | 0.45 ms (1.65 -> 1.2); the image the same within run-to-run noise |
+  | S26b | **A lean trace** (trace_lean.frag): trace.sc's body without the diffuse ray, its bounce's sun ray and the haze's traced shafts, compiled out (SF_LEAN); main.cpp draws with it whenever those are off (all of the optimized preset), with trace.frag otherwise (the engine's per-pass `enabled`). The full shader's registers are sized for its every path | 1.25 ms; the same image (SANTA_FE_NO_LEAN=1 for the full one) |
+  | S26c | **The sky light every fourth frame** (sky_dirs, sky_ambient; at once when the look changes): it moves with the clouds' drift | 0.27 ms |
+  | S26d | **farMax folded into farState's alpha** (the column's highest, 20 m steps rounded up): a texture and a sampler fewer in five passes | -- |
+
+  Tried and dropped (so not tried again):
+  - *A finer skip grid for the far march* (8 x 8-texel max heights built on the GPU each frame): the trace got
+    slower, 6.1 -> 7.5 ms, and the grid's own pass cost 1.8. The march is long-latency and register-bound; code
+    in it costs more than the steps it saves.
+  - *Reusing each face's sun ray from last frame* (exact with per-face shading: every texel of a face traces the
+    same ray): the optimized preset shades per hit, so no two texels share a ray; nothing to reuse without
+    approximating the shadow edges S22 keeps deterministic.
+  - *The depth pre-pass at a quarter of the trace's resolution*: depth_pre +0.1 ms and the trace +0.07.
+
+  What is left is the march itself (the engine's voxel traversal and the far field's): the trace 6.2 of 12.3 ms.
+  Reconstruct 1.2, ao_trace 0.7, depth_pre 0.55, clouds 0.5, resolve 0.4.
+
+- **S27** (proposed, 2026-11-25): trees that match at every distance, and faster where it counts -- the user: the
+  hand-off from near to far trees is not smooth, the far trees' shapes diverge from the real ones, and it must be
+  faster.
+
+  Measured first, from the user's view over the forest (`MOUNTAINS_CAMERA=3897.0,-413.7,7.8,5.3984,-0.0187`,
+  `MOUNTAINS_SUN=250.0,22.0`; the second bench view beside the plaza): 1600 x 900, **15.6 ms GPU, the trace 8.9**
+  (plaza 12.3 / 6.2). Props' sun shadows ~1 ms of it; the rest is mostly the primary march through the canopy. In
+  the user's window (~2546 x 2804, 5x the bench's pixels) it is 37 ms, the trace 28.4: the window, more than the
+  view, makes it slow.
+
+  Seen in the screenshot -- three kinds of tree, each hand-off visible:
+  1. 0.1-0.2 m rings: the trees as made (cone, lit and shaded sides).
+  2. 0.4-3.2 m rings: the shape pyramid's coarse voxels, solid at a fifth filled: the cone becomes loose blocks,
+     the ground between them (lit, tan) shows through as streaks.
+  3. The far field: crowns on a grid, coloured and sized apart from the voxel trees -- smaller, darker, denser.
+
+  | # | Step | Why |
+  |---|---|---|
+  | S27a | **The forest view as a bench view** (`SANTA_FE_BENCH` takes both) and the trace split by part there | Every change is judged where it is slow |
+  | S27b | **A beam hierarchy instead of a ray a texel** (Laine & Karras's beam optimisation taken further; depth_pre is its one-level form today: a ray through each 8 x 8 tile's centre, the trace starting at the nearest of nine). Beams of 16, 8, 4, 2 texels, each a cone over its tile, marched conservatively from its parent's distance, and each ends as one of: *empty* (the tile is sky or the far field), *one face* (a voxel face covers the whole cone and nothing is in front: every texel's hit is that face's plane, exactly, no march), or *mixed* (split). Only mixed tiles at one texel march per texel. A beam wider than a ring's voxel reads the coarser ring: the beam's footprint is the level of detail (S27d). The sun's ray too: a one-face tile's patch swept toward the sun as one beam, all lit or all shadowed, split only at a shadow's edge | Cost follows what is on screen (edges, leaves), not the pixel count: near voxels cost one beam, not 50 rays; with geometry prefiltered to the footprint (S27c, d) nothing is under a texel, so nothing is left for a temporal upscaler to fix. The user: focus rays where needed, far enough that no temporal upscaling is needed |
+  | S27b0 | **Measure the room first**: from the G-buffer, the share of trace texels in 2/4/8/16 tiles that are all one voxel face, and the march's steps per texel as a heat map, at the plaza and the forest | The ceiling of S27b's saving, before building it |
+  | S27c | **Coarse trees that cover what the tree covers**: each level's solid threshold chosen per shape so its projected area (from the sun and from the side) matches level 0's; its colour the mean of the outer leaves, not of every voxel | The blocks and tan streaks of the middle rings |
+  | S27d | **A tree's level by its size on screen**: past where a ring's voxel is under a texel, the march reads the next ring for trees | No sub-texel leaves to step through (the forest's cost), no shimmer |
+  | S27e | **Far crowns from the same trees**: the far field's crown cell, height, radius and colour measured from the shape library and the coarse levels, not set apart | The far forest the same forest, the same density and tone |
+  | S27f | **A dithered hand-off**: each tree changes level at its own (hashed) distance across a band | No line where every tree changes at once |
+
+  Later, if b is not enough: the march's spare rays sent where last frame's image was least certain (temporal -- weighed against S22's clean image), and a learned upscaler for what the reconstruction cannot rebuild (sub-texel foliage, the far field): FSR 2/3 (open, every vendor, temporal), DLSS (NVIDIA only, its SDK under bgfx), or a small network trained on this renderer's own scale-1 / scale-0.5 pairs with its G-buffer.
+
+  **As measured (S27a, b0, 2026-11-25).** `MOUNTAINS_CAMERA=forest` is the second bench view.
+  `SANTA_FE_DUMP_GBUFFER=<file>` (with `MOUNTAINS_CAPTURE`) reads the trace's gPos and gFace back once;
+  with `PJV_MARCH_STATS` defined in trace_lean.frag gFace carries the camera ray's and the sun's DDA steps and
+  scene visits instead (`trace.sc`), for heat maps.
+  - **One-face tiles are few where the cost is.** Hit texels that would still need their own ray in a beam
+    quadtree (tiles one plane, nothing in front): plaza 51% at scale 0.5 / 32% at 1.0; forest 86% / 65%. Grazing
+    ground squeezes a face under a texel vertically, and foliage is a different voxel every texel. At scale 1.0
+    the forest would trace 2.6x the rays it does at 0.5: beams do not make scale 1 affordable there.
+  - **Sky: 38% of texels.** Their rays walked every ring to learn nothing. Now when all nine pre-pass rays
+    round a texel miss, its camera ray is not traced (`skipDistance` -1): **forest trace 9.2 -> 8.1 ms, plaza
+    6.1 -> 5.6**, the skyline unchanged (diffs are the motes' noise).
+  - **Empty space in front is ~10%**: starting each ray at its own pre-pass texel's distance (unsafe, a test)
+    saved 0.8 of 8.1 ms. That is the most finer beams could save on the approach.
+  - **Where the camera ray's steps go** (forest, 25 a texel): 30-100 m holds 55% of them (57 a texel, the
+    crowns seen edge-on); the heat map's brightest line is ring 0's edge, where rays that skimmed the ground
+    restart on ring 1, and the crowns' silhouettes. **The sun's ray** takes 7 DDA steps but 31 scene visits a
+    texel (the props' tree of loose objects, its reach 45 m / sin(sun)): its cost is finding what to test.
+  - Forest, features off one at a time (trace 8.2): sun shadows -1.6, props (ring 0's trees) -1.3, leaf light
+    -0.8, far trees -0.4; the rest under 0.2 each.
+
+  **Trees (S27c, e; 2026-11-25).** The user: start on the trees.
+  - **S27c, coarse trees that cover what the tree covers** (placement.hpp buildMips): a coarse voxel's coverage
+    is the share of its block's lines of finest voxels, along x, y and z, that meet the shape; voxels are made
+    solid in order of coverage until the level's projected area (both sides, and from above at half weight)
+    comes nearest the shape's. Measured on the cached shapes, the old "a fifth filled" kept 0.19-1.25x of a
+    tree's side area (a fir at 1.6 m: 0.27x side, 0.18x top -- the specks and tan streaks); this keeps
+    0.95-1.1x of the side, the top 0.5-1.0x on the coarsest conifers. A solid voxel's slot is the one its block
+    shows from outside the shape (voxels first along a row from any side, by how many sides), and a block with
+    nothing seen (a trunk in its crown) takes its most seen neighbour's. In the forest view the middle rings'
+    trees keep their cones and colour; cost the same (forest trace 8.0 ms, plaza 5.2).
+  - **S27e, the far field's crowns are the voxel rings' trees** (mountains_far.sc mtnCanopyAt, columns.hpp):
+    the far atlas carries the two species and their mix (farCanopy's alpha, in place of a mean height) and the
+    cover times collectTrees' clumps, from its 100 m footprint, nothing on rock or water (farColour's alpha);
+    the shader hashes the 9.9 m tree cells as trees.hpp does (`mtnTrees.x` the seed), so each crown stands at its
+    tree's trunk, of its species, size and height, kept by the same test (growTree's reach a species, measured:
+    juniper 0.53 of its height, pinyon 0.42, ponderosa 0.22, fir 0.19, spruce 0.16, aspen 0.20). Each species'
+    crown is its shape's (the library's 99th-percentile radius, 0.19-0.57 of the height, and its top a - b d^p
+    fitted to the shapes' azimuth-averaged tops: cones for fir and spruce, ponderosa round-shouldered, the
+    woodland's domes flat) -- they were 0.45 of the height for all, capped by the cell, two shapes. The column
+    skip's maximum is the tallest tree a texel's species can grow (1.6x). Across the hand-off (a raised view over
+    the forest) the two sides' mean colour now agree (luminance 101 far, 97 voxels); the far side is smoother
+    (its crowns a heightfield, sd 14 against 22).
+  - The orange specks through the forest at every distance are the understory's gambel oak in autumn colour
+    (trees.hpp: `RedSoil` half the time), not a level's error: in every capture with leaf light or glints off.
+    `SANTA_FE_OFF2=<bits>` turns the second flag set's features off for such checks.
+  - **S27f (a dithered hand-off) not done**: the march takes each ring's box as the whole truth inside it, so a
+    tree cannot hand over by its own distance without the traversal consulting the next ring where a ring is
+    empty. Left with S27b and d.
+
+  **The ring-0 edge and the sun's object lookups (2026-11-25).** The user: get to work on both.
+  - *The ring-0 edge*: the heat map's line is rays skimming the ground the whole width of ring 0 (a tree march
+    in every terrain chunk they pass over, each inside its content box) before they hit just inside ring 1;
+    the grid march itself is cheap (ring 1's cells over ring 0's hole are empty visits). The lever is where those
+    rays start. Tried and dropped: the four pre-pass rays round a texel instead of nine (trace 8.0 -> 7.7 ms) and
+    a tighter margin (0.985 t - 0.3 m for 0.96 t - 2 m; -0.15 more): together the image lost thin geometry in
+    blocks and the far skyline (a hill between four sky samples taken for sky; >40 levels off on 7254 pixels of
+    the forest against ~1000 of noise). Nine rays and the old margin stay; what is left of this line needs the
+    ground coarser for a grazing ray (its footprint along the ground, not its distance), a traversal change.
+  - *The sun's object lookups*: a sun ray (segment 1, and 5 past foliage) pops ~26 nodes of the props' tree a
+    texel (49.5 visits with props, 23.4 without; DDA steps 11.4 / 7.1), 0.9 ms of the forest's trace (8.0 -> 7.1
+    with SANTA_FE_SHADOW_PROPS=0). Its reach does not matter (1000, 40, 15 and 5 m all 8.0 ms): the work is
+    where the ray starts, inside the overlapping content boxes of the trees round it -- the props' tree already
+    holds content boxes, not cubes. Tried and dropped: an any-hit query for the sun's rays (stop the props' walk at
+    the first hit, skip it after a terrain hit): 8.00 -> 7.98 ms, as the engine's own note found on the gallery.
+    Left: a sun-space map of the props' occlusion (first foliage and first solid along the sun, ~0.12 m texels
+    over ~120 m round the camera), traced once and kept while the sun and the near rings stand still, so a pixel's
+    sun ray marches the rings only and reads the props from the map: up to the 0.9 ms, the edges voxel-sharp.
+
+  Open: conservative beams need an any-child occupancy per coarse voxel (the rings' own voxels are thresholded at a fifth filled, so they can miss what a finer ring holds) -- a bit beside each, or a dilated march. And whether S27d can be done in the march (a ring's lookup per step) without the latency S26 found code in it
+  costs; else in the bake (the ring holds the coarser tree where it would be under a texel from the rings' usual
+  distance).

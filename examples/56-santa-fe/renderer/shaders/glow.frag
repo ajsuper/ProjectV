@@ -2,11 +2,11 @@ $input v_color0
 $input v_texcoord0
 
 // =============================================================================
-// glow.frag -- the glow round bright things (the sun, sunlit cloud and snow), at a quarter of the window each
-// way (santa-fe-reference S12: it was 32 taps a window pixel, and too strong -- it overexposed the image).
+// glow.frag -- the light shafts, at a quarter of the window each way (santa-fe-reference S16).
 //
-// Only what is well over the scene's whites contributes, through a soft knee; spread by 9 bilinear taps 2.5
-// texels apart (a wide, soft kernel at this resolution). display.frag adds it, faintly.
+// It held the glow round bright things too (S12: a threshold and a soft knee, 9 taps 2.5 texels apart): it put
+// a smudged halo round every sunlit cloud. That is the bloom chain's now (bloom.sc, S24: restir-pt's, no
+// threshold). display.frag adds the shafts.
 //
 // Input: 0 resolved. Output: rgb the glow.
 // =============================================================================
@@ -16,37 +16,15 @@ $input v_texcoord0
 #include <pjv_camera.sc>
 
 SAMPLER2D(resolved, 0);
-SAMPLER2D(gPos, 2);   // the trace pass's (its colour 1, gPos 2): w < 0 the sky
+SAMPLER2D(gPos, 3);   // the trace pass's (its colour 2, gPos 3; 1 is the resolve's history): w < 0 the sky
 
 uniform vec4 mtnSun;   // w: exposure
 uniform vec4 sunDir;
 uniform vec4 sfFlags;   // y bit 6: the light shafts
 uniform vec4 sfRays;    // x strength, y decay a step, z length (share of the way to the sun)
-uniform vec4 sfGlow;   // x: threshold (exposed), y: knee, z: spread (texels between taps)
-
-vec3 bright(vec3 c) {
-    c *= mtnSun.w;
-    float l = max(c.r, max(c.g, c.b));
-    float knee = max(sfGlow.y, 1e-3);
-    float threshold = sfGlow.x;
-    float soft = clamp(l - threshold + knee, 0.0, 2.0 * knee);
-    soft = soft * soft / (4.0 * knee);
-    float w = max(soft, l - threshold) / max(l, 1e-4);
-    return c * w / mtnSun.w;
-}
 
 void main() {
-    vec2 texel = passTargetRes.zw;
-    vec3 sum = vec3(0.0, 0.0, 0.0);
-    float wsum = 0.0;
-    for (int y = -1; y <= 1; y++)
-        for (int x = -1; x <= 1; x++) {
-            vec2 o = vec2(float(x), float(y));
-            float w = exp(-dot(o, o) / 2.0);
-            sum += bright(texture2D(resolved, v_texcoord0 + o * texel * sfGlow.z).rgb) * w;
-            wsum += w;
-        }
-    vec3 outC = sum / wsum;
+    vec3 outC = vec3(0.0, 0.0, 0.0);
     // Light shafts (SF2_GODRAYS; santa-fe-reference S16): from each pixel toward the sun on screen, the open sky
     // along the way, fading as it goes -- ridges, crowns and the clouds' dark bases cut it into rays. Strongest
     // looking toward the sun, gone looking away.

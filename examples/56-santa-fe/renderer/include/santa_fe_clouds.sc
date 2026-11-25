@@ -24,6 +24,13 @@
 uniform vec4 mtnClouds;   // x: coverage bias (-1..1), y: base m, z: top m, w: extinction per m at full density
 uniform vec4 sfCloudMap;  // the cloud-shadow map: x, y its corner (world x, z), z its size (m), w held (1)
 uniform vec4 mtnWind;     // xy: the weather's offset (m), z: shape scale (m per noise period), w: brightness
+// After Unreal's volumetric clouds and Guerrilla's Nubis (santa-fe-reference S23e):
+uniform vec4 sfCloudPhase; // x: phase G (forward), y: G2 (back), z: their blend, w: powder (dark sunward edges)
+uniform vec4 sfCloudMS;    // multiple scattering octaves: x contribution, y occlusion, z eccentricity (each a factor an
+                           // octave), w how many octaves (0: single scattering)
+uniform vec4 sfCloudAmb;   // x: ambient (sky) strength, y: ground contribution (the shadowed land lighting the bases),
+                           // z: cloud-bottom occlusion (a base sees the deck's underside, not the clear sky), w: precipitation
+uniform vec4 sfCloudType;  // x: type (0 stratus, 0.5 cumulus, 1 cumulonimbus), y: erosion (the wisps' bite)
 
 #define SF_NOISE_RES 128.0
 #define SF_NOISE_TILE 130.0
@@ -77,7 +84,13 @@ float sfCloudDensitySmooth(vec3 p, float coverage, bool detail) {
     vec2 wq = (p.xz + mtnWind.xy) / 34000.0;
     float towering = sfNoiseSlice(41.0, fract(wq + 0.53) * SF_NOISE_RES).r;
     float tall = clamp(mix(0.3, 1.05, smoothstep(0.25, 0.6, towering)) * mix(0.8, 1.15, coverage), 0.25, 1.0);
-    float profile = smoothstep(0.0, 0.05, h) * (1.0 - smoothstep(tall * 0.5, tall, h));
+    // The cloud type (Nubis' weather map's type, here one for the sky, S23e): stratus a thin, flat, even sheet at
+    // the base of the layer; cumulus as above; cumulonimbus every tower to the top, and more of the sky filled.
+    float stratus = clamp(1.0 - 2.0 * sfCloudType.x, 0.0, 1.0);
+    float nimbus = clamp(2.0 * sfCloudType.x - 1.0, 0.0, 1.0);
+    tall = mix(mix(tall, 0.22, stratus), 1.0, nimbus);
+    coverage = min(coverage + 0.2 * nimbus * smoothstep(0.1, 0.4, coverage), 1.0);
+    float profile = smoothstep(0.0, mix(0.05, 0.2, stratus), h) * (1.0 - smoothstep(tall * mix(0.5, 0.15, stratus), tall, h));
     // By height within the layer, not altitude: lowering the layer lowers the same clouds (their shadows come
     // with them), rather than reshuffling them -- with altitude, a lower base read another slice of the noise.
     vec3 q = vec3(p.x + mtnWind.x, (y - base + 4300.0) * 1.25, p.z + mtnWind.y) / mtnWind.z;
@@ -89,6 +102,7 @@ float sfCloudDensitySmooth(vec3 p, float coverage, bool detail) {
     float fbmW = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
     float billow = n.r * 0.72 + n2.r * 0.28;   // two scales of heads: cauliflower
     float shape = sfRemap(billow, -(1.0 - fbmW), 1.0, 0.0, 1.0);
+    shape = mix(shape, 0.55 + 0.45 * shape, stratus);   // a sheet, not heads
     float d = sfRemap(shape * profile, 1.0 - coverage, 1.0, 0.0, 1.0);
     if (d <= 0.0) return 0.0;
     d *= mix(0.7, 1.25, smoothstep(0.1, 0.6, h));   // denser cores up the towers: bright, hard-edged heads
@@ -96,10 +110,10 @@ float sfCloudDensitySmooth(vec3 p, float coverage, bool detail) {
         vec4 m = sfNoise(q * 6.3 + vec3(0.31, 0.17, 0.53));
         float wisps = m.g * 0.625 + m.b * 0.25 + m.a * 0.125;
         wisps = mix(wisps, 1.0 - wisps, clamp(h * 4.0, 0.0, 1.0));   // billowy above, wispy at the base
-        d = sfRemap(d, wisps * 0.45, 1.0, 0.0, 1.0);
+        d = sfRemap(d, wisps * sfCloudType.y, 1.0, 0.0, 1.0);
     }
-    // A steeper edge: cumulus are hard-edged, the fuzz of a thin margin reads as cotton.
-    return clamp(d * 1.6, 0.0, 1.0);
+    // A steeper edge: cumulus are hard-edged, the fuzz of a thin margin reads as cotton. Rain clouds are denser.
+    return clamp(d * 1.6 * (1.0 + 0.8 * sfCloudAmb.w), 0.0, 1.0);
 }
 
 // The blocky style (santa-fe-reference S12; with the blocky far field): clouds of boxes -- big ones for a
@@ -181,6 +195,22 @@ SF_GLOBAL float sfCloudFrontBox = 0.0; // blocky: the size of the box it met fir
 
 // The light a cloud scatters at p, per unit of its extinction: the sun through the cloud toward it (a short
 // march, multiple scattering in octaves, Beer-powder) and the sky and ground round it. `c` the coverage there.
+// The light march's samples (S24d, after Horizon): in a cone round the sun's direction, not on its line -- a fixed
+// kernel, turned by the golden angle, a little wider each step -- so self-shadowing comes out smooth and each
+// sample blends its neighbours' density in ("a nice ambient effect"); and one more far out, for the shadows the
+// clouds cast on each other.
+#define SF_CLOUD_IN_SCATTER 1.0     // how much the in-scattering probability darkens the octaves (S24e)
+#define SF_CLOUD_CONE      0.3      // the cone's spread: offset per metre along the sun at the last step
+#define SF_CLOUD_FAR_LIGHT 2500.0   // m: the long sample
+#define SF_CLOUD_FAR_LEN   900.0    // m of cloud it stands for
+vec3 sfConeOffset(int j, vec3 sun) {
+    vec3 t = abs(sun.y) < 0.99 ? normalize(cross(sun, vec3(0.0, 1.0, 0.0))) : vec3(1.0, 0.0, 0.0);
+    vec3 b = cross(sun, t);
+    float a = float(j) * 2.39996323 + 0.7;
+    float r = (float(j) + 1.0) / 6.0;
+    return (t * cos(a) + b * sin(a)) * r;
+}
+
 vec3 sfCloudLight(vec3 p, float c, float sigma, float mu, vec3 sun, vec3 sunColour, vec3 skyUp, vec3 groundUp) {
     float tauSun = 0.0;
     float ls = 60.0;
@@ -188,26 +218,60 @@ vec3 sfCloudLight(vec3 p, float c, float sigma, float mu, vec3 sun, vec3 sunColo
     int lightSteps = int(sfQuality.y + 0.5);
     for (int j = 0; j < 6; j++) {
         if (j >= lightSteps) break;
-        vec3 q = p + sun * lt;
+        vec3 q = p + sun * lt + sfConeOffset(j, sun) * (lt * SF_CLOUD_CONE);
         tauSun += sfCloudDensity(q, c, j < 2) * mtnClouds.w * ls;   // the step's coverage: it changes over km
         lt += ls * 1.5;
         ls *= 1.9;
     }
+    {
+        vec3 q = p + sun * SF_CLOUD_FAR_LIGHT;
+        float cq = sfCoverage(q.xz);
+        if (cq > 0.02) tauSun += sfCloudDensity(q, cq, false) * mtnClouds.w * SF_CLOUD_FAR_LEN;
+    }
     float h = clamp((p.y - mtnClouds.y) / (mtnClouds.z - mtnClouds.y), 0.0, 1.0);
+    // In-scattering (S24e, after Horizon's powdered sugar and Nubis' probabilities): deep in a cloud a point
+    // gathers light scattered in from round it; at a thin edge, or the base, there is little to gather. The
+    // multiple-scattering octaves carry that light, so they are scaled by how likely it is -- by the density here
+    // and the height in the layer; the single scattering (the silver lining) is not.
+    float den = sigma / max(mtnClouds.w, 1e-6);
+    float depthP = 0.05 + pow(clamp(den, 0.0, 1.0), sfRemap(h, 0.3, 0.85, 0.5, 2.0));
+    // (The vertical term is a cumulus' -- a heap's flat base sees little of its body; a stratus deck's base is where
+    // the light diffused through it comes out: faded with the type.)
+    float vertP = mix(pow(sfRemap(h, 0.07, 0.14, 0.1, 1.0), 0.8), 1.0, clamp(1.0 - 2.0 * sfCloudType.x, 0.0, 1.0));
+    float inScatter = clamp(depthP * vertP, 0.0, 1.0);
     vec3 sunL = vec3(0.0, 0.0, 0.0);
     float a = 1.0, b = 1.0, cc = 1.0;
-    // Multiple scattering, in octaves. 0.5 and 0.5 (were 0.6 and 0.3: the fourth octave reached as deep as
-    // 3% of the optical depth, so a cloud's heart and shaded side were as bright as its sunlit head -- flat white).
-    for (int k = 0; k < 4; k++) {
-        float ph = mix(sfHG(mu, 0.8 * cc), sfHG(mu, -0.25 * cc), 0.3);
-        sunL += sunColour * (a * ph * exp(-tauSun * b));
-        a *= 0.5; b *= 0.5; cc *= 0.5;
+    // Multiple scattering, in octaves (Wrenninge; Unreal's contribution / occlusion / eccentricity, sfCloudMS:
+    // 0.5 each by default -- 0.6 and 0.3 let the fourth octave reach 3% of the optical depth, flat white hearts).
+    // The phase: two Henyey-Greenstein lobes, forward and back, blended (sfCloudPhase).
+    int octaves = int(sfCloudMS.w + 0.5);
+    for (int k = 0; k < 6; k++) {
+        if (k > octaves) break;
+        float ph = mix(sfHG(mu, sfCloudPhase.x * cc), sfHG(mu, sfCloudPhase.y * cc), sfCloudPhase.z);
+        sunL += sunColour * (a * ph * exp(-tauSun * b)) * (k == 0 ? 1.0 : mix(1.0, inScatter, SF_CLOUD_IN_SCATTER));
+        a *= sfCloudMS.x; b *= sfCloudMS.y; cc *= sfCloudMS.z;
     }
-    float powder = 1.0 - exp(-sigma * 2.0 * 120.0);   // Beer-powder: dark edges facing the sun
-    sunL *= mix(1.0, powder * 2.0, 0.5);
-    // Less than the full sky: deep inside a cloud most of it is hidden; grey bases, bright sunlit heads.
-    vec3 amb = mix(groundUp * 1.2 + skyUp * 0.2, skyUp * 0.85, 0.25 + 0.75 * h) * (0.35 + 0.45 * h);
-    return (sunL + amb) * mtnWind.w;
+    // Beer-powder: dark edges facing the sun -- seen looking away from it, not into it (Horizon: view dependent;
+    // looking toward the sun the forward scattering's silver lining is what the edges show).
+    float powder = 1.0 - exp(-sigma * 2.0 * 120.0);
+    sunL *= mix(1.0, powder * 2.0, sfCloudPhase.w * clamp(0.5 - 0.5 * mu, 0.0, 1.0) * 2.0);
+    // Diffusion (S23): deep in a thick deck the octaves' exponentials die, but light still gets through, scattered
+    // many times -- the two-stream answer, 1 / (1 + 0.75 (1 - g) tau), minus what the octaves already carry,
+    // leaving as from a diffusing sheet (t E / pi). It is why an overcast's base is grey, not black.
+    // Only where the light has come through a good depth of cloud (a deck, a tower's heart): on a fair-weather
+    // cumulus' shaded side the octaves are right as they are, and this flattened it to cream.
+    float diffuse = max(1.0 / (1.0 + 0.75 * (1.0 - 0.85) * tauSun) - exp(-tauSun * 0.125), 0.0) * smoothstep(6.0, 40.0, tauSun);
+    sunL += sunColour * (0.3183 * diffuse);
+    // The fill. From above: the clear sky over the deck at its top; lower down, that sky through the deck above
+    // -- Unreal's cloud-bottom occlusion (sfCloudAmb.z), here by the same diffusion through the cloud toward the
+    // sun. From below: the land, in the clouds' own shadow (ground contribution, sfCloudAmb.y; groundUp is
+    // dimmed). Less than the full sky: deep inside a cloud most of it is hidden; grey bases, bright sunlit heads.
+    float through = 1.0 / (1.0 + 0.75 * (1.0 - 0.85) * tauSun);
+    vec3 skyFill = skyUp * mix(1.0, mix(through, 1.0, h), sfCloudAmb.z);
+    vec3 amb = mix(groundUp * (1.2 * sfCloudAmb.y) + skyFill * 0.2, skyFill * 0.85, 0.25 + 0.75 * h) * (0.35 + 0.45 * h);
+    // Rain clouds: their droplets' depth swallows the light (darker throughout, the fill most).
+    float rain = sfCloudAmb.w;
+    return (sunL * (1.0 - 0.5 * rain) + amb * (sfCloudAmb.x * (1.0 - 0.6 * rain))) * mtnWind.w;
 }
 
 // A box's face, lit cartoon-fashion: tops bright, sides by how they face the sun, bottoms dark.

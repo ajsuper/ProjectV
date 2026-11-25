@@ -26,6 +26,33 @@
 
 namespace mountains {
 
+// The far field's tree species (mountains_far.sc MTN_SP_*): 0 none, 1 juniper, 2 pinyon, 3 ponderosa, 4 fir,
+// 5 spruce, 6 aspen; and its height before a tree's size (trees.hpp collectTrees, m before kTreeScale).
+inline uint32_t farSpecies(Material m) {
+    switch (m) {
+        case Material::Juniper: return 1;
+        case Material::Pinyon: return 2;
+        case Material::Ponderosa: return 3;
+        case Material::Fir: return 4;
+        case Material::Spruce: return 5;
+        case Material::AspenGold:
+        case Material::AspenBare: return 6;
+        default: return 0;
+    }
+}
+inline double farSpeciesHeight(Material m) {
+    switch (farSpecies(m)) {
+        case 1: return 3.6;
+        case 2: return 5.2;
+        case 3: return 19.0;
+        case 4: return 17.0;
+        case 5: return 20.0;
+        case 6: return 12.0;
+        default: return 0.0;
+    }
+}
+
+
 constexpr int kChunkRes = 64;
 
 constexpr double kBaseVoxel = 0.1;   // the user: 0.125 still a little coarse; trees and props grown to match
@@ -43,7 +70,7 @@ struct ColumnResult {
     std::vector<ColumnChunk> chunks;   // a voxel ring's
     std::vector<float> farHeights;     // a far ring's: 64 x 64 heights, x fastest
     std::vector<uint32_t> farColours;  // ... the ground's colours, RGBA8 (sRGB; a: the canopy cover), x fastest
-    std::vector<uint32_t> farCanopy;   // ... the canopy's colour (sRGB; a: bit 7 conifer, bits 0-6 height / 0.35 m)
+    std::vector<uint32_t> farCanopy;   // ... the canopy's colour (sRGB; a: species A bits 0-2, B bits 3-5, B's share bits 6-7 / 3)
     float farMax = -1e9f;              // ... the highest the ground and its trees stand (the blocky march skips by it)
     std::vector<PropInstance> props;   // the props this column draws (rings 0-2)
     double sampleMs = 0, fillMs = 0;
@@ -108,12 +135,20 @@ inline ColumnResult generateFarColumn(const Landform& land, int ring, int64_t ix
             // snow, which the cover thins.
             const double crownSnow = std::max(m.snow, smoothstep(snowlineAt() - 320.0, snowlineAt() - 80.0, double(out.farHeights[k])));
             tree = lerp(tree, materialColour(Material::Snow) * 0.8, crownSnow * 0.55);
-            const Material lead = m.treeMix > 0.5 ? m.treeB : m.treeA;
-            const bool conifer = lead == Material::Fir || lead == Material::Spruce;
-            const double height = mix(canopyHeight(m.treeA), canopyHeight(m.treeB), m.treeMix);
-            const uint32_t code = uint32_t(std::clamp(int(std::lround(height / 0.35)), 0, 127)) | (conifer ? 128u : 0u);
+            // The trees as collectTrees grows them (santa-fe-reference S27e): the same footprint (100 m), the same
+            // species and mix, the cover times the same clumps, nothing on rock or water -- the far field's crowns
+            // stand on the same cells as the voxel rings' trees (mountains_far.sc mtnCanopyAt hashes the cells as
+            // trees.hpp does), so the two are one forest. The clumps (~40 m) only where a texel can hold them.
+            const SurfaceMix mt = surfaceMix(s, x, z, 100.0);
+            double treeCover = mt.rock > 0.5 || mt.water > 0.3 ? 0.0 : std::clamp(mt.cover, 0.0, 1.0);
+            if (v <= 10.0) treeCover = std::min(1.0, treeCover * (0.35 + 1.3 * smoothstep(-0.25, 0.25, fbm(x / 40.0, z / 40.0, 2, 62))));
+            out.farColours[k] = (out.farColours[k] & 0x00FFFFFFu) | (byte(treeCover) << 24);
+            const uint32_t code = farSpecies(mt.treeA) | (farSpecies(mt.treeB) << 3) |
+                                  (uint32_t(std::clamp(int(std::lround(mt.treeMix * 3.0)), 0, 3)) << 6);
             out.farCanopy[k] = byte(tree.r) | (byte(tree.g) << 8) | (byte(tree.b) << 16) | (code << 24);
-            out.farMax = std::max(out.farMax, out.farHeights[k] + float(cover * height));
+            // The tallest a tree here can be (size 1.6), so the blocky march's column skip never cuts a crown.
+            const double tallest = treeCover > 0.0 ? 1.6 * kTreeScale * std::max(farSpeciesHeight(mt.treeA), farSpeciesHeight(mt.treeB)) : 0.0;
+            out.farMax = std::max(out.farMax, out.farHeights[k] + float(tallest));
         }
     out.sampleMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
     out.fillMs = std::chrono::duration<double, std::milli>(clock::now() - t1).count();

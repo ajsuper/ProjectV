@@ -13,13 +13,14 @@ $input v_texcoord0
 #include <pjv_camera.sc>
 
 SAMPLER2D(accumulated, 0);   // resolve.frag's output
-SAMPLER2D(glow, 1);          // glow.frag's
-SAMPLER2D(gPos, 3);          // the trace pass's (colour 2, gPos 3): how far each pixel sees
+SAMPLER2D(glow, 2);          // glow.frag's light shafts (1: the resolve's history)
+SAMPLER2D(bloomUp1, 3);      // the bloom chain's top (bloom.sc: its five levels summed)
+SAMPLER2D(gPos, 5);          // the trace pass's (colour 4, gPos 5): how far each pixel sees
 
 uniform vec4 windowRes;
 uniform vec4 mtnSun;      // rgb the sun's light, w: exposure
 vec3 mtnSunWarm() { return mtnSun.rgb; }
-uniform vec4 sfDisplay;   // x: glow strength, y: vignette, z: contrast, w: saturation
+uniform vec4 sfDisplay;   // x: the bloom's share of the image, y: vignette, z: contrast, w: saturation
 uniform vec4 sunDir;
 uniform vec4 sfFlags;     // y bit 5: the motes
 uniform vec4 sfMotes;     // x density (0..1), y size (m), z brightness, w drift (m/s)
@@ -69,11 +70,33 @@ vec3 motes(vec2 uv, vec2 res, float depth) {
     return light * (0.04 + 6.0 * phase) * mtnSunWarm() * sfMotes.z;
 }
 
+// The tone curve (santa-fe-reference S24g): identity up to SF_TONE_KNEE, then Reinhard on the peak channel with
+// slope 1 at the knee (hue kept, a little desaturated as it rises). The engine's Khronos Neutral shoulder (0.76
+// to 1) put everything over about 3x white at 0.97-1: sunlit clouds near the sun were one flat cream. Here 3x
+// white is 0.92, 10x 0.97 -- the gradation stays.
+#define SF_TONE_KNEE 0.5
+#define SF_TONE_DESAT 0.12
+vec3 sfTonemap(vec3 c) {
+    c = max(c, vec3(0.0, 0.0, 0.0));
+    float peak = max(c.r, max(c.g, c.b));
+    if (peak <= SF_TONE_KNEE) return c;
+    float t = (peak - SF_TONE_KNEE) / (1.0 - SF_TONE_KNEE);
+    float newPeak = SF_TONE_KNEE + (1.0 - SF_TONE_KNEE) * t / (1.0 + t);
+    c *= newPeak / peak;
+    float g = 1.0 - 1.0 / (SF_TONE_DESAT * (peak - newPeak) + 1.0);
+    return mix(c, vec3(newPeak, newPeak, newPeak), g);
+}
+
 void main() {
     vec2 uv = v_texcoord0;
     vec3 hdr = texture2D(accumulated, uv).rgb;
-    // The glow (glow.frag, a quarter of the window), added faintly.
-    hdr += texture2D(glow, uv).rgb * sfDisplay.x;
+    // A meter (SANTA_FE_RAW, sfDisplay2.y): the scene's linear light times the exposure, sRGB-encoded, nothing else
+    // -- no bloom, grade, vignette or tone curve -- to measure what the renderer makes before the look.
+    if (sfDisplay2.y > 0.5) { gl_FragColor = vec4(clamp(pjvLinearToSrgb(max(hdr * mtnSun.w, vec3(0.0, 0.0, 0.0))), 0.0, 1.0), 1.0); return; }
+    // The bloom (S24, restir-pt's): its five levels averaged, mixed in -- a share of the light moved, not added, so
+    // every bright thing glows in proportion and nothing gets a halo of its own. Then the light shafts.
+    hdr = mix(hdr, texture2D(bloomUp1, uv).rgb * 0.2, sfDisplay.x);
+    hdr += texture2D(glow, uv).rgb;
     if ((uint(sfFlags.y + 0.5) & 32u) != 0u) {
         float depth = texture2D(gPos, uv).w;
         hdr += motes(uv, windowRes.xy, depth < 0.0 ? 1e9 : depth);
@@ -88,5 +111,5 @@ void main() {
     }
     vec2 v = uv - 0.5;
     hdr *= 1.0 - sfDisplay.y * dot(v, v) * 1.6;
-    gl_FragColor = vec4(pjvDisplay(hdr, 1.0, gl_FragCoord.xy), 1.0);
+    gl_FragColor = vec4(clamp(pjvDither(pjvLinearToSrgb(sfTonemap(hdr)), gl_FragCoord.xy), 0.0, 1.0), 1.0);
 }

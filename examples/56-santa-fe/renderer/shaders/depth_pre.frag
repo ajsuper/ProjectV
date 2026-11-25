@@ -28,7 +28,6 @@ SAMPLER2D(farHeight, 0);
 SAMPLER2D(farColour, 1);
 SAMPLER2D(farState, 2);
 SAMPLER2D(farCanopy, 3);
-SAMPLER2D(farMax, 4);
 #include <mountains_far.sc>
 
 void main() {

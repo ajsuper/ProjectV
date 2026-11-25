@@ -21,8 +21,16 @@
 //   ./mountains --selftest         headless: generate, fly 5 km and back, check for holes, stray cells and leaks
 //
 //   MOUNTAINS_SEED, MOUNTAINS_RINGS (11), MOUNTAINS_N (voxels from the centre to a ring's edge: 512)
-//   MOUNTAINS_CAMERA=plaza|atalaya|baldy|aerial, or "x,z,above,yaw,pitch" (m, radians; yaw 0 = east)
+//   MOUNTAINS_CAMERA=plaza|atalaya|baldy|aerial|forest, or "x,z,above,yaw,pitch" (m, radians; yaw 0 = east)
 //   MOUNTAINS_CAPTURE=<file>       save a screenshot once everything has generated, then exit
+//   SANTA_FE_WEATHER=<preset>      clear, scattered, overcast or storm (the panel's weather presets)
+//   SANTA_FE_RAW=1                 the display shows the scene's linear light x exposure, sRGB-encoded, nothing else
+//                                  (no bloom, grade, vignette or tone curve): a meter, with MOUNTAINS_EXPOSURE low
+//   SANTA_FE_OFF2=<bits>           the second flag set's features off (kSSS, kGlints, ...), as SANTA_FE_OFF the first's
+//   SANTA_FE_NO_LEAN=1             always the full trace pass (trace.frag), not trace_lean.frag where it would do
+//   SANTA_FE_BENCH=1|optimized|preset  GPU ms with each feature off in turn (all, the optimized preset's, or the preset
+//                                  alone over 300 frames with its passes: an A/B of a shader change), then exit
+//   SANTA_FE_DUMP_GBUFFER=<file>   with MOUNTAINS_CAPTURE: the trace's hit distance and voxel faces as raw floats (S27b0)
 //   SANTA_FE_CAMERA_ABS=1          MOUNTAINS_CAMERA's third number is the camera's height, not its height above the ground
 //   SANTA_FE_SHADOW_VOXELS=<m>, SANTA_FE_SHADOW_LOD=<voxels>, SANTA_FE_SHADOW_PROPS=<m>, SANTA_FE_SHADOW_DEBUG=1|2 (voxels|far only),
 //   SANTA_FE_NO_SSAO               the shadow rays' parts and the AO's, for measuring
@@ -203,12 +211,13 @@ struct Ring {
 // The far rings' tiles on their way to the renderer (plan D15): each far ring has a square of the
 // height and colour atlases, a column's 64 x 64 tile at (column mod span) in it, and a slot in the state
 // texture saying which column a tile holds (the low bytes of its ix, iz; b = 255 once it holds one).
+constexpr double kFarMaxStep = 20.0;   // m: a far column's highest point, as farState's alpha (mountains_far.sc)
+
 struct FarField {
     static constexpr int kAtlasCols = 3, kAtlasRows = 2;   // ring squares across and down: six far rings
     int width = 0, height = 0;                             // the atlases, texels
     int stateWidth = 0, stateHeight = 0;
     std::vector<uint8_t> state;
-    std::vector<float> maxHeight;   // per state texel: the column's highest (the blocky march's skip)
     bool stateDirty = true;
     struct Upload { int x, y; std::vector<float> heights; std::vector<uint32_t> colours, canopy; };
     std::deque<Upload> uploads;
@@ -240,12 +249,15 @@ struct Clipmap {
         az = (f / FarField::kAtlasCols) * int(span) * kChunkRes + sz * kChunkRes;
         sx += f * int(span);
     }
-    void setFarState(int k, int64_t ix, int64_t iz, bool held) {
+    // A held column's state: its id (x, z: which column the slot holds now), held (b), and its highest point (a: the
+    // ground and its trees, in steps of kFarMaxStep rounded up -- the blocky march's skip, mtnFarColumnMax).
+    void setFarState(int k, int64_t ix, int64_t iz, bool held, float maxHeight = 1e9f) {
         int sx, sz, ax, az;
         farSlot(k, ix, iz, sx, sz, ax, az);
         uint8_t* p = &farField.state[(size_t(sz) * size_t(farField.stateWidth) + size_t(sx)) * 4];
         if (held) {
-            p[0] = uint8_t(ix & 255); p[1] = uint8_t(iz & 255); p[2] = 255; p[3] = 255;
+            p[0] = uint8_t(ix & 255); p[1] = uint8_t(iz & 255); p[2] = 255;
+            p[3] = uint8_t(std::clamp(std::ceil(double(maxHeight) / kFarMaxStep), 0.0, 255.0));
         } else if (p[0] == uint8_t(ix & 255) && p[1] == uint8_t(iz & 255)) {
             p[2] = 0;   // only if it still holds this column, not the one that took its slot
         }
@@ -493,10 +505,10 @@ int installResults(Clipmap& cm, projv::Scene& scene, Pool& pool, double budgetMs
             if (cm.isFar(res.ring)) {
                 int sx, sz, ax, az;
                 cm.farSlot(res.ring, res.ix, res.iz, sx, sz, ax, az);
+                (void)sx; (void)sz;
                 if (cm.farField.upload)
                     cm.farField.uploads.push_back({ax, az, std::move(res.farHeights), std::move(res.farColours), std::move(res.farCanopy)});
-                cm.setFarState(res.ring, res.ix, res.iz, true);
-                cm.farField.maxHeight[size_t(sz) * size_t(cm.farField.stateWidth) + size_t(sx)] = res.farMax;
+                cm.setFarState(res.ring, res.ix, res.iz, true, res.farMax);
             }
             for (ColumnChunk& cc : res.chunks) {
                 const int64_t iy = cc.iy;
@@ -519,7 +531,7 @@ int installResults(Clipmap& cm, projv::Scene& scene, Pool& pool, double budgetMs
 
 // The tree brush's materials (and three ramps of ours), interned into every component after the terrain's,
 // in the same order, so a tree's slots are the same whether it stands loose or is baked into a ring.
-struct ExtraMaterial { std::string name; uint32_t packed; uint32_t transmission; };
+struct ExtraMaterial { std::string name; uint32_t packed; uint32_t transmission; uint32_t shine = 0; };   // shine: a rock's glossiness byte (S21)
 std::vector<ExtraMaterial> gExtraMaterials;
 std::vector<uint8_t> gExtraSlots;   // the slot each took (the same in every component)
 
@@ -546,13 +558,17 @@ Palette internPalette(projv::Scene& scene, projv::ComponentRecord& comp) {
                 projv::packRGB10(float(c.r), float(c.g), float(c.b)));
         }
     // What the reference renderer reads besides the colour (renderer/shaders/trace.frag): the `metallic`
-    // byte is how smooth a surface is drawn (R6: rock, stone, snow), glossiness water's mirror and snow's
-    // sheen, transmission the light through leaves. Nothing else draws this scene.
+    // byte is how smooth a surface is drawn (R6: rock, stone, snow), glossiness water's mirror, snow's mark
+    // and a rock's shine (S21: how strongly it glints and reflects; the boulders' from their brush),
+    // transmission the light through leaves. Nothing else draws this scene.
     for (int m = 0; m < kMaterialCount; ++m) {
         const Material mat = Material(m);
         uint32_t smooth = 0, gloss = 0, trans = 0;
         switch (mat) {
-            case Material::Granite: case Material::Gneiss: case Material::Lichen: case Material::Basalt: smooth = 255; break;
+            case Material::Granite: smooth = 255; gloss = 38; break;   // shine 0.15: feldspar and mica
+            case Material::Gneiss: smooth = 255; gloss = 77; break;    // 0.3: its dark bands are glossy
+            case Material::Lichen: smooth = 255; gloss = 10; break;    // 0.04: lichen is matt
+            case Material::Basalt: smooth = 255; gloss = 51; break;    // 0.2
             case Material::Sediment: smooth = 150; break;
             case Material::Snow: smooth = 200; gloss = 60; break;
             case Material::Water: gloss = 240; break;
@@ -576,6 +592,7 @@ Palette internPalette(projv::Scene& scene, projv::ComponentRecord& comp) {
     for (const ExtraMaterial& e : gExtraMaterials) {
         const uint8_t slot = projv::utils::internMaterial(scene, comp, e.name, e.packed);
         comp.materialPalette[slot].packedExtra = (comp.materialPalette[slot].packedExtra & 0xFF00FFFFu) | (e.transmission << 16);
+        comp.materialPalette[slot].packedSurface = (comp.materialPalette[slot].packedSurface & 0x00FFFFFFu) | (e.shine << 24);
         extra.push_back(slot);
     }
     if (gExtraSlots.empty()) gExtraSlots = extra;
@@ -606,6 +623,7 @@ void placeCamera(Camera& cam, const Landform& land) {
     else if (spec == "atalaya") { x = 6900; z = 300; above = 3; yaw = 3.14159f; pitch = -0.05f; }
     else if (spec == "baldy") { x = 15700; z = 15400; above = 40; yaw = 3.3f; pitch = -0.08f; }
     else if (spec == "aerial") { x = -12000; z = -9000; above = 2500; yaw = 0.65f; pitch = -0.18f; }
+    else if (spec == "forest") { x = 3897.0; z = -413.7; above = 7.8; yaw = 5.3984f; pitch = -0.0187f; }   // over the trees: the bench's slow view
     else std::sscanf(spec.c_str(), "%lf,%lf,%lf,%f,%f", &x, &z, &above, &yaw, &pitch);
     cam.x = x;
     cam.z = z;
@@ -642,6 +660,11 @@ struct State {
     int frames = 0;
     std::string capturePath;
     int captureStage = 0;
+    // SANTA_FE_DUMP_GBUFFER=<file>: with the capture, the trace's gPos and gFace read back once (S27b0)
+    std::string dumpPath;
+    bgfx::TextureHandle dumpTex[2] = {BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE};
+    std::vector<float> dumpData[2];
+    int dumpW = 0, dumpH = 0;
     // The reference renderer (santa-fe-reference): its switches and knobs, what they were last frame (a
     // change starts the accumulation over), and how many frames are accumulated.
     struct Look {
@@ -652,19 +675,36 @@ struct State {
         float cloudScale = 11000.0f, cloudWindX = 0.0f, cloudWindZ = 0.0f;
         int cloudSteps = 56;
         float hazeDensity = 2.5e-5f, hazeBase = 1700.0f, hazeHeight = 450.0f, hazeG = 0.55f;
+        // The fog after Unreal's exponential height fog (santa-fe-reference S23d): a second layer, where it starts,
+        // how opaque it may get, the sky's and the sun's light in it, its tint and albedo.
+        float fog2Density = 0.0f, fog2Base = 2300.0f, fog2Height = 800.0f;
+        float fogStart = 0.0f, fogMaxOpacity = 1.0f, fogSky = 1.0f, fogSun = 0.2f, fogAlbedo = 1.0f;
+        float fogTint[3] = {1.0f, 1.0f, 1.0f};
+        // The clouds after Unreal's volumetric clouds and Nubis (S23e): phase, multiple scattering, fill, type.
+        float cloudG = 0.8f, cloudG2 = -0.25f, cloudPhaseBlend = 0.3f, cloudPowder = 0.5f;
+        // S25: a thick cloud reflects ~80% of the sun, like a white surface; 0.5 / 0.5 / 0.5 and three octaves gave
+        // ~7% back toward a viewer with the sun behind. The in-scattering probability keeps thin edges from glowing.
+        float msContribution = 0.8f, msOcclusion = 0.35f, msEccentricity = 0.6f;
+        int msOctaves = 5;
+        float cloudAmbient = 1.0f, cloudGround = 1.0f, cloudBottomOcclusion = 0.7f, precipitation = 0.0f;
+        float cloudType = 0.5f, cloudErosion = 0.45f;
+        float airUnderClouds = 0.6f;   // how much the clouds' shadow dims the air's light (S23c)
         float treeCell = float(kTreeCell), crownScale = 1.0f, farDetail = 1.0f, patches = 1.0f;
         float smoothGround = 0.0f;
-        float glowThreshold = 3.0f, glowKnee = 1.0f, glowSpread = 2.5f;
-        float glow = 0.12f, vignette = 0.35f, contrast = 1.2f, saturation = 1.25f, vibrance = 0.4f;
+        float glow = 0.04f, vignette = 0.35f, contrast = 1.0f, saturation = 1.0f, vibrance = 0.15f;   // S25: a light grade (was 1.2 / 1.25 / 0.4)
         // Quality (renderer/include/mountains_far.sc sfQuality): smoothing radius, cloud light steps, far
         // shadow reach (m), far detail octaves (share).
         int smoothRadius = 2, cloudLightSteps = 6;
         float renderScale = 0.5f;   // the trace pass's share of the window, each way
         bool reconstruct = true, reconDebug = false;
+        // How each layer of the frame reaches the window (santa-fe-reference S22b; reconstruct.frag, resolve.frag):
+        // 0 the voxel reconstruction, 1 spatial (the bilinear tent, held to the pixel's depth), 2 temporal (the
+        // reconstruction, jittered, accumulated over frames). The traced AO: 0 per voxel face, 1 spatial, 2 temporal.
+        int upColour = 2, upSun = 2, upReflect = 2, upShadow = 0, upAO = 1;
+        bool shadowFilter = true, aoFilter = true;   // the A-Trous filters (S22c, S22d)
         int blockFactor = 4;   // blocky distance: a block, in far texels (1, 2, 4, 8)
         float shadowSoftness = 0.025f;   // shadow blur: penumbra per metre of blocker distance
-        float glintBright = 30.0f, glintSharp = 0.9985f;   // sun glints on snow and rock
-        float cloudBright = 0.75f;       // the clouds' light (santa_fe_clouds.sc), against the sky's
+        float cloudBright = 1.0f;        // the clouds' light (santa_fe_clouds.sc), against the sky's (S25: 0.75 left them grey)
         float shadowVoxels = 120.0f;     // sun-shadow rays through voxels this far (m), the far field's heightfield past it (0: all the way)
         float shadowLODVoxels = 48.0f;   // and a coarser march past this many voxels along them
         float bevelWidth = 0.15f, bevelStrength = 0.8f, smoothMore = 0.5f;   // Normals
@@ -672,13 +712,13 @@ struct State {
         float leafSpread = 1.5f, leafSpreadGain = 0.5f;   // the glow's light spread through a crown (shadow_soft)
         float aoReach = 6.0f, aoStrength = 0.85f, aoBlur = 4.0f;
         int aoSteps = 32;            // the traced AO's ray (ao_trace.frag, half the trace's resolution)
-        float aoRange = 300.0f;      // ... out to this far (m)
+        float aoRange = 3000.0f;     // ... out to this far (m; its reach grows with distance, ao_trace.frag)
         bool ssao = true;            // and a screen-space AO at the trace's resolution (shadow_soft)
         float ssaoRadius = 0.4f, ssaoStrength = 0.8f;
         float moteDensity = 0.25f, moteSize = 0.012f, moteBright = 1.0f, moteDrift = 0.25f;
-        float rayStrength = 0.35f, rayDecay = 0.96f, rayLength = 0.9f;
+        float rayStrength = 0.04f, rayDecay = 0.96f, rayLength = 0.9f;
         float farShadow = 40000.0f, detailOctaves = 1.0f;
-        float air = 1.0f, airHaze = 0.15f;
+        float air = 1.0f, airHaze = 40.0f;   // S25: the aerosol, ~0.03 optical depth over Santa Fe (0.15 was ~0.0005: a navy sky)
         float sunAzimuth = 250.0f, sunElevation = 22.0f;
         bool operator==(const Look& o) const { return std::memcmp(this, &o, sizeof(Look)) == 0; }
     } look, lastLook;
@@ -689,11 +729,12 @@ struct State {
     int captureSamples = 256;
     // SANTA_FE_BENCH: once settled, every feature switched off in turn (and the presets), GPU ms by pass for
     // each, one window, one batch -- what each part of the image costs.
-    struct BenchCase { std::string name; uint32_t flags; };
+    struct BenchCase { std::string name; uint32_t flags; uint32_t flags2Off = 0; };   // flags2Off: second-word features off
     std::vector<BenchCase> bench;
     int benchCase = -1, benchFrame = 0;
     double benchTrace = 0, benchTotal = 0;
     int benchSamples = 0;
+    int benchSettle = 4, benchFrames = 12;   // frames before measuring, and in all (SANTA_FE_BENCH=preset: 30, 330)
     std::vector<std::string> benchLines;
     Clock::time_point settledAt;
     int settledFrames = 0;
@@ -716,7 +757,6 @@ void setUpRings(State& st, projv::Scene& scene) {
         f.stateWidth = int(cm.span()) * FarField::kAtlasCols * FarField::kAtlasRows;
         f.stateHeight = int(cm.span());
         f.state.assign(size_t(f.stateWidth) * size_t(f.stateHeight) * 4, 0);
-        f.maxHeight.assign(size_t(f.stateWidth) * size_t(f.stateHeight), 1e9f);
     }
     cm.ring.resize(size_t(cm.rings));
     for (int k = 0; k < cm.rings; ++k) {
@@ -824,8 +864,11 @@ void prepareTrees(State& st) {
     if (rocks.load(error)) {
         const auto t1 = Clock::now();
         const size_t offset = gExtraMaterials.size();
+        // Each role's glossiness is its shine (S21: mica, pyrite and quartz glint and reflect far more than
+        // granite), under water's 0.9.
         for (const auto& slot : rocks.slots())
-            gExtraMaterials.push_back({slot.name, projv::packRGB10(slot.color[0], slot.color[1], slot.color[2]), 0u});
+            gExtraMaterials.push_back({slot.name, projv::packRGB10(slot.color[0], slot.color[1], slot.color[2]), 0u,
+                                       uint32_t(std::lround(std::clamp(slot.glossiness, 0.0f, 0.88f) * 255.0f))});
         int count = 0;
         for (const BoulderDesign& b : santaFeBoulders()) {
             TreeVoxels t;
@@ -949,7 +992,7 @@ void report(State& st, projv::Scene& scene) {
 
 // The air, as mountains_sky.sc models it: sea-level-relative air density, haze, the haze's forward
 // scattering, and multiple scattering's share. High, dry air: the haze is light.
-projv::core::vec4 kAtmosphere{1.0f, 0.15f, 0.6f, 0.8f};
+projv::core::vec4 kAtmosphere{1.0f, 40.0f, 0.6f, 1.6f};   // S25: w the sky's multiple scattering (0.8: a navy zenith)
 constexpr double kSunIrradiance = 6.0;   // above the air, in the renderer's units
 float kExposure = 1.7f;
 
@@ -1002,7 +1045,7 @@ enum Feature : uint32_t {
 };
 enum Feature2 : uint32_t {   // the second word: mountains_far.sc SF2_*
     kCloudBlocky = 1u, kSmoothGround = 2u, kSmoothMore = 4u, kBevel = 8u, kSSS = 16u, kMotes = 32u, kGodRays = 64u,
-    kAO = 128u, kFarShadowLow = 256u, kGlints = 512u,
+    kAO = 128u, kFarShadowLow = 256u, kGlints = 512u, kFarAO = 1024u, kSkyLight = 2048u,
     kNormalBlend = kSmoothGround | kSmoothMore | kBevel   // with kSmooth (the first word): the panel's "normal blend"
 };
 struct FeatureName { Feature bit; const char* name; const char* help; };
@@ -1021,13 +1064,22 @@ constexpr FeatureName kFeatureNames[] = {
     {kFarDetail, "far detail normals", "55's gully and grain normals below the far field's texels"},
     {kFarPatches, "far ground patches", "bare earth and grass in patches between the far trees"},
     {kAerial, "aerial perspective", "the air between the camera and what it sees"},
-    {kGloss, "gloss (water, snow)", "water mirrors the sky; snow's sheen"},
+    {kGloss, "gloss (water, sheen)", "water mirrors the sky; snow, rock and leaves a faint rough reflection of the sky (screen space; trace.frag SF_SHEEN_)"},
     {kTranslucent, "leaf translucency", "light through backlit crowns"},
     {kProps, "props (rocks, shrubs)", "the loose chunks on every ray"},
     {kSkip, "depth pre-pass skip", "camera rays start where the 1/8 pre-pass says the ground can begin"},
     {kFaceShading, "per-face shading", "shadow, cloud shadow and the ground's normal taken at each voxel face's centre: every texel of a face agrees, so the reconstruction is exact from the first frame; off: per hit (shadow edges fall across faces)"},
-    {kShadowBlur, "shadow blur (by distance)", "soft shadows from the hard shadow ray: blurred in screen space, wider the farther the blocker (optimized mode; reference traces the sun's disc)"},
+    {kShadowBlur, "sun apart (shadow filter)", "the sun's light goes out apart from the hard shadow ray's visibility, for the shadow filter and the Upscale settings (optimized mode; reference traces the sun's disc)"},
     {kFarBlocky, "blocky far ground", "stylized: the far field as big flat-topped blocks, larger with distance (faster to draw and to generate)"},
+};
+
+// The second word's features, for the bench (the optimized preset with each off).
+struct FeatureName2 { Feature2 bit; const char* name; };
+constexpr FeatureName2 kFeatureNames2[] = {
+    {kSmoothGround, "smooth ground"}, {kBevel, "bevel"}, {kSSS, "leaf light (SSS)"},
+    {kMotes, "motes"}, {kGodRays, "god rays"}, {kAO, "AO (traced + screen)"},
+    {kFarShadowLow, "far shadow at cloud res"}, {kGlints, "glints"}, {kFarAO, "far-field AO"},
+    {kSkyLight, "sky light cube"},
 };
 
 // ---- The clouds' noise (renderer/include/santa_fe_clouds.sc) -------------------------------------
@@ -1139,7 +1191,7 @@ std::shared_ptr<projv::ConstructedRenderer> buildRenderer(projv::graphics::Rende
 
 // Sends the far columns finished since last frame to the atlases, a tile at a time, and the state
 // texture when it changed (texture ids in renderer/resources.json).
-constexpr uint32_t kFarHeightTexture = 16, kFarColourTexture = 17, kFarStateTexture = 18, kFarCanopyTexture = 19, kFarMaxTexture = 20;
+constexpr uint32_t kFarHeightTexture = 16, kFarColourTexture = 17, kFarStateTexture = 18, kFarCanopyTexture = 19;
 void uploadFarField(State& st) {
     FarField& f = st.clipmap.farField;
     if (!st.renderer) return;
@@ -1156,7 +1208,6 @@ void uploadFarField(State& st) {
     f.uploads.clear();
     if (f.stateDirty) {
         projv::graphics::setTextureToData(st.renderer, kFarStateTexture, f.state.data(), uint32_t(f.stateWidth), uint32_t(f.stateHeight));
-        projv::graphics::setTextureToData(st.renderer, kFarMaxTexture, reinterpret_cast<unsigned char*>(f.maxHeight.data()), uint32_t(f.stateWidth), uint32_t(f.stateHeight));
         f.stateDirty = false;
     }
 }
@@ -1168,18 +1219,57 @@ constexpr uint32_t kOptimizedFlags = kShadowBlur | kShadows | kSmooth | kClouds 
 // (shadows, the far trees, clouds and their shadows, the air, the props) at a fraction of the cost -- no traced
 // sky light or bounce (the most expensive part, and the least missed), hard shadows, cheaper clouds,
 // smoothing and far detail (santa-fe-reference S4).
+// Weather presets (santa-fe-reference S23f): the clouds, their kind and rain, and the haze, together.
+enum class Weather { Clear, Scattered, Overcast, Storm };
+void applyWeather(State::Look& L, Weather w) {
+    const State::Look d{};
+    L.cloudBase = d.cloudBase; L.cloudTop = d.cloudTop; L.cloudExtinction = d.cloudExtinction;
+    L.cloudType = d.cloudType; L.precipitation = d.precipitation; L.cloudBright = d.cloudBright;
+    L.hazeDensity = d.hazeDensity; L.hazeHeight = d.hazeHeight; L.fog2Density = d.fog2Density;
+    L.fog2Base = d.fog2Base; L.fog2Height = d.fog2Height; L.fogSun = d.fogSun;
+    for (int i = 0; i < 3; ++i) L.fogTint[i] = d.fogTint[i];
+    switch (w) {
+    case Weather::Clear:
+        L.cloudCoverage = -0.6f;
+        L.hazeDensity = 1.5e-5f;
+        break;
+    case Weather::Scattered:
+        L.cloudCoverage = d.cloudCoverage;
+        break;
+    case Weather::Overcast:   // a low, even stratus deck, a little drizzle, the valleys hazy
+        L.cloudCoverage = 0.55f; L.cloudBase = 3300.0f; L.cloudTop = 5600.0f; L.cloudExtinction = 0.04f;
+        L.cloudType = 0.15f; L.precipitation = 0.25f;
+        L.hazeDensity = 6e-5f; L.hazeHeight = 600.0f;
+        L.fog2Density = 1.5e-5f; L.fog2Base = 2300.0f; L.fog2Height = 800.0f;
+        L.fogSun = 0.05f;
+        break;
+    case Weather::Storm:      // towering cumulonimbus, rain, the mountains in murk
+        L.cloudCoverage = 0.85f; L.cloudBase = 3000.0f; L.cloudTop = 11500.0f; L.cloudExtinction = 0.1f;
+        L.cloudType = 0.95f; L.precipitation = 0.85f;
+        L.hazeDensity = 1.2e-4f; L.hazeHeight = 900.0f;
+        L.fog2Density = 4e-5f; L.fog2Base = 2500.0f; L.fog2Height = 1500.0f;
+        L.fogSun = 0.0f; L.fogTint[0] = 0.85f; L.fogTint[1] = 0.9f; L.fogTint[2] = 1.0f;
+        break;
+    }
+}
+
 void applyMode(State::Look& L, bool optimized) {
     if (optimized) {
         L.flags = kOptimizedFlags;
-        L.flags2 = (L.flags2 & kCloudBlocky) | kSmoothGround | kBevel | kSSS | kMotes | kGodRays | kAO | kFarShadowLow | kGlints;
+        L.flags2 = (L.flags2 & kCloudBlocky) | kSmoothGround | kBevel | kSSS | kMotes | kGodRays | kAO | kFarShadowLow | kGlints | kFarAO | kSkyLight;
         L.renderScale = 0.5f;
-        L.cloudSteps = 28;
+        L.cloudSteps = 40;   // S24f: the frames share them again (cloud_temporal.frag)
         L.cloudLightSteps = 4;
         L.smoothRadius = 1;
         L.farShadow = 20000.0f;
         L.detailOctaves = 0.6f;
         L.shadowVoxels = 120.0f;
         L.shadowLODVoxels = 48.0f;
+        // The frame through the voxel reconstruction and the temporal resolve, as before S22 (the user: that looked
+        // cleaner); the shadow and the AO stay deterministic and filtered, the traced AO per pixel.
+        L.upColour = L.upSun = L.upReflect = 2;
+        L.upShadow = 0;
+        L.upAO = 1;
     } else {
         L.flags = kAllFeatures;
         L.flags2 = (L.flags2 & kCloudBlocky) | kSmoothGround | kBevel | kSSS | kMotes | kGodRays | kGlints;   // AO: the diffuse rays do it
@@ -1191,8 +1281,23 @@ void applyMode(State::Look& L, bool optimized) {
         L.detailOctaves = 1.0f;
         L.shadowVoxels = 0.0f;
         L.shadowLODVoxels = 512.0f;
+        L.upColour = 2;   // everything rides in the colour here (the sun's disc, the diffuse ray): accumulated
+        L.upSun = L.upReflect = L.upShadow = 0;
+        L.upAO = 1;
     }
 }
+
+// The trace pass, in full (2) or without what only the reference renderer asks for (32, trace_lean.frag): one of
+// the two draws, by the features on. A pass's view is its index in render.json.
+constexpr uint32_t kTraceShader = 2, kTraceLeanShader = 32;
+constexpr uint32_t kSkyDirsShader = 21, kSkyAmbientShader = 20;
+constexpr int kSkyLightEvery = 4;        // frames between the sky light's updates
+constexpr float kPreDepthDivisor = 8.0f;   // the depth pre-pass at this fraction of the trace's resolution, each way
+
+void reportPasses(State& st, projv::graphics::RenderInstance& ri);
+void dumpGBufferStart(State& st);
+void dumpGBufferWrite(State& st);
+constexpr bgfx::ViewId kBlitView = 200;   // after every pass, before the UI (254, 255): the dump's copies
 
 void runBench(projv::Application& app, State& st) {
     int pending = 0;
@@ -1207,22 +1312,38 @@ void runBench(projv::Application& app, State& st) {
     State::BenchCase& c = st.bench[size_t(st.benchCase)];
     if (st.benchFrame == 0) applyMode(st.look, c.name.rfind("optimized", 0) == 0);
     st.look.flags = c.flags;
+    st.look.flags2 &= ~c.flags2Off;
     ++st.benchFrame;
+    // The optimized preset's frame by pass, as a capture logs it (reportPasses).
+    const bool byPass = c.name == "optimized preset";
+    st.profiling = byPass && st.benchFrame > st.benchSettle;
     const bgfx::Stats* gs = bgfx::getStats();
-    if (st.benchFrame > 4 && gs && gs->gpuTimerFreq > 0) {   // three frames for the switch to reach the GPU
+    if (st.benchFrame > st.benchSettle && gs && gs->gpuTimerFreq > 0) {   // three frames for the switch to reach the GPU
         const double toMs = 1000.0 / double(gs->gpuTimerFreq);
         st.benchTotal += double(gs->gpuTimeEnd - gs->gpuTimeBegin) * toMs;
+        const auto& passes = app.world.ctx().get<projv::graphics::RenderInstance>().getRendererSpecification(1).dependencyGraph.renderPasses;
+        uint16_t traceView = 0xffff;
+        for (size_t v = 0; v < passes.size(); ++v)
+            if ((passes[v].shaderID == kTraceShader || passes[v].shaderID == kTraceLeanShader) && st.renderer->dependencyGraph[v].enabled)
+                traceView = uint16_t(v);
         for (uint16_t v = 0; v < gs->numViews; ++v)
-            if (gs->viewStats[v].view == 1)
+            if (gs->viewStats[v].view == traceView)
                 st.benchTrace += double(gs->viewStats[v].gpuTimeEnd - gs->viewStats[v].gpuTimeBegin) * toMs;
         ++st.benchSamples;
     }
-    if (st.benchFrame >= 12) {
+    if (st.benchFrame >= st.benchFrames) {
         char line[160];
         std::snprintf(line, sizeof line, "%-26s trace %7.1f ms   frame %7.1f ms", c.name.c_str(), st.benchTrace / std::max(1, st.benchSamples),
                       st.benchTotal / std::max(1, st.benchSamples));
         st.benchLines.push_back(line);
         projv::core::info("[SANTA FE] bench {}", line);
+        if (byPass) {
+            reportPasses(st, app.world.ctx().get<projv::graphics::RenderInstance>());
+            st.profiling = false;
+            st.profiled = 0;
+            st.gpuFrameMs = 0;
+            std::fill(std::begin(st.passMs), std::end(st.passMs), 0.0);
+        }
         st.benchTrace = st.benchTotal = 0;
         st.benchSamples = 0;
         st.benchFrame = 0;
@@ -1260,10 +1381,11 @@ void render(projv::Application& app) {
     {
         auto& scales = st.renderer->resources.textures.relativeTextureScales;
         const float s = std::clamp(st.look.renderScale, 0.2f, 1.0f);
-        scales[2] = s / 8.0f;
-        for (uint32_t id : {3u, 5u, 6u, 7u, 8u, 9u, 11u, 12u, 21u, 22u, 23u}) scales[id] = s;
+        scales[2] = s / kPreDepthDivisor;
+        for (uint32_t id : {3u, 5u, 6u, 7u, 8u, 9u, 11u, 12u, 21u, 22u, 23u, 26u, 27u, 29u, 30u, 31u}) scales[id] = s;   // 26, 27: gGloss, reflect.frag; 29-31 shadow_soft's layers
         scales[13] = scales[14] = s * 0.5f;   // clouds.frag: a quarter of the trace's texels
-        scales[25] = s * 0.5f;                // ao_trace.frag: likewise
+        for (uint32_t id : {52u, 53u}) scales[id] = s * 0.5f;   // and their history (cloud_temporal.frag)
+        scales[25] = scales[39] = scales[40] = s * 0.5f;   // ao_trace.frag and its A-Trous: likewise
     }
     const bool preview = std::chrono::duration<double>(Clock::now() - st.lastMove).count() < 0.3;
     const auto& r = st.renderer;
@@ -1280,12 +1402,22 @@ void render(projv::Application& app) {
             return v;
         };
         const int phase = st.renderFrame % 16 + 1;
-        projv::core::vec4 jitter(halton(phase, 2) - 0.5f, halton(phase, 3) - 0.5f, 0.0f, 0.0f);
+        // The jitter only when a layer is accumulated (S22a): else every frame traces the same rays.
+        const bool anyTemporal = L.upColour == 2 || L.upSun == 2 || L.upReflect == 2 || L.upShadow == 2 || L.upAO == 2;
+        projv::core::vec4 jitter = anyTemporal ? projv::core::vec4(halton(phase, 2) - 0.5f, halton(phase, 3) - 0.5f, 0.0f, 0.0f)
+                                               : projv::core::vec4(0.0f, 0.0f, 0.0f, 0.0f);
         projv::graphics::setUniformToValue(st.renderer, "jitterParams", jitter);
-        projv::core::vec4 temporal(reset ? 1.0f : 0.0f, float(st.maxSamples), 12.0f, 0.0f);
+        // The resolve's history (restir-pt's): 64 frames still -- enough to average the jitter -- unless random
+        // samples need converging (the reference mode's sun disc, diffuse ray, shafts: max samples); 16 moving.
+        const bool noisy = (L.flags & (kSoftShadows | kDiffuse | kShafts)) != 0;
+        projv::core::vec4 temporal(reset ? 1.0f : 0.0f, noisy ? float(st.maxSamples) : std::min(64.0f, float(st.maxSamples)), 16.0f, 0.0f);
         projv::graphics::setUniformToValue(st.renderer, "sfTemporal", temporal);
         projv::core::vec4 recon(0.0f, 0.0f, st.look.reconstruct ? 0.0f : 1.0f, st.look.reconDebug ? 1.0f : 0.0f);
         projv::graphics::setUniformToValue(st.renderer, "sfRecon", recon);
+        projv::core::vec4 up(float(L.upColour), float(L.upSun), float(L.upReflect), float(L.upShadow));
+        projv::graphics::setUniformToValue(st.renderer, "sfUpscale", up);
+        projv::core::vec4 up2(float(L.upAO), L.shadowFilter ? 1.0f : 0.0f, L.aoFilter ? 1.0f : 0.0f, anyTemporal ? 1.0f : 0.0f);
+        projv::graphics::setUniformToValue(st.renderer, "sfUpscale2", up2);
     }
     projv::core::vec4 frame(float(st.renderFrame), shifted ? 1.0f : 0.0f,
                             float(std::min(st.accumulated, st.maxSamples)), st.accumulated >= st.maxSamples ? 1e6f : 0.0f);
@@ -1306,23 +1438,33 @@ void render(projv::Application& app) {
     { projv::core::vec4 u_(L.sssStrength, L.sssDepth * float(kGameScale), L.sssWrap, L.leafSheen); projv::graphics::setUniformToValue(r, "sfSSS", u_); }
     { projv::core::vec4 u_(L.leafSpread * float(kGameScale), L.leafSpreadGain, 32.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfLeafSpread", u_); }
     { projv::core::vec4 u_(L.aoReach * float(kGameScale), L.aoStrength, float(L.aoSteps), L.aoRange); projv::graphics::setUniformToValue(r, "sfAO", u_); }
-    { projv::core::vec4 u_(L.ssaoRadius * float(kGameScale), L.ssaoStrength, 24.0f, L.ssao ? 1.0f : 0.0f); projv::graphics::setUniformToValue(r, "sfSSAO", u_); }
+    { projv::core::vec4 u_(L.ssaoRadius * float(kGameScale), L.ssaoStrength, 48.0f, L.ssao ? 1.0f : 0.0f); projv::graphics::setUniformToValue(r, "sfSSAO", u_); }
     { projv::core::vec4 u_(L.aoBlur, 0.0f, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfAOBlur", u_); }
     { projv::core::vec4 u_(L.moteDensity, L.moteSize * float(kGameScale), L.moteBright, L.moteDrift * float(kGameScale)); projv::graphics::setUniformToValue(r, "sfMotes", u_); }
     { projv::core::vec4 u_(L.rayStrength, L.rayDecay, L.rayLength, 0.0f); projv::graphics::setUniformToValue(r, "sfRays", u_); }
     { projv::core::vec4 u_(float(std::chrono::duration<double>(Clock::now() - st.started).count()), 0.0f, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfTime", u_); }
     { projv::core::vec4 u_(L.treeCell, L.crownScale, L.farDetail, L.patches); projv::graphics::setUniformToValue(r, "mtnCanopy", u_); }
+    { projv::core::vec4 u_(float(st.land->settings().seed), 0.0f, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "mtnTrees", u_); }   // the trees' grid (mountains_far.sc)
     { projv::core::vec4 u_(L.cloudCoverage, L.cloudBase, L.cloudTop, L.cloudExtinction); projv::graphics::setUniformToValue(r, "mtnClouds", u_); }
     { projv::core::vec4 u_(L.cloudWindX, L.cloudWindZ, L.cloudScale, L.cloudBright); projv::graphics::setUniformToValue(r, "mtnWind", u_); }
     { projv::core::vec4 u_(L.hazeDensity, L.hazeBase, L.hazeHeight, L.hazeG); projv::graphics::setUniformToValue(r, "mtnFog", u_); }
+    { projv::core::vec4 u_(L.fog2Density, L.fog2Base, L.fog2Height, 0.0f); projv::graphics::setUniformToValue(r, "sfFog2", u_); }
+    { projv::core::vec4 u_(L.fogStart, L.fogMaxOpacity, L.fogSky, L.fogSun); projv::graphics::setUniformToValue(r, "sfFog3", u_); }
+    { projv::core::vec4 u_(L.fogTint[0], L.fogTint[1], L.fogTint[2], L.fogAlbedo); projv::graphics::setUniformToValue(r, "sfFogTint", u_); }
+    { projv::core::vec4 u_(L.cloudG, L.cloudG2, L.cloudPhaseBlend, L.cloudPowder); projv::graphics::setUniformToValue(r, "sfCloudPhase", u_); }
+    { projv::core::vec4 u_(L.msContribution, L.msOcclusion, L.msEccentricity, float(L.msOctaves)); projv::graphics::setUniformToValue(r, "sfCloudMS", u_); }
+    { projv::core::vec4 u_(L.cloudAmbient, L.cloudGround, L.cloudBottomOcclusion, L.precipitation); projv::graphics::setUniformToValue(r, "sfCloudAmb", u_); }
+    { projv::core::vec4 u_(L.cloudType, L.cloudErosion, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfCloudType", u_); }
+    // The sky's light and the overcast stay on the GPU (sky_ambient.frag's 8 x 1, bound where it is read): a
+    // readback to set them as uniforms stalled a frame every time (bgfx's Vulkan readTexture waits for idle).
+    { projv::core::vec4 u_(0.0f, L.airUnderClouds, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfOvercast", u_); }
     { projv::core::vec4 u_(L.glow, L.vignette, L.contrast, L.saturation); projv::graphics::setUniformToValue(r, "sfDisplay", u_); }
-    { projv::core::vec4 u_(L.vibrance, 0.0f, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfDisplay2", u_); }
+    { static const bool raw = std::getenv("SANTA_FE_RAW") != nullptr;
+      projv::core::vec4 u_(L.vibrance, raw ? 1.0f : 0.0f, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfDisplay2", u_); }
     { projv::core::vec4 u_(float(L.smoothRadius), float(L.cloudLightSteps), L.farShadow, L.detailOctaves); projv::graphics::setUniformToValue(r, "sfQuality", u_); }
     { projv::core::vec4 u_(float(L.blockFactor), 0.0f, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfFar", u_); }
-    { projv::core::vec4 u_(L.shadowSoftness, 12.0f, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfShadow", u_); }
-    { projv::core::vec4 u_(L.glowThreshold, L.glowKnee, L.glowSpread, 0.0f); projv::graphics::setUniformToValue(r, "sfGlow", u_); }
+    { projv::core::vec4 u_(L.shadowSoftness, 24.0f, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfShadow", u_); }   // y: the blocker search, window pixels
     { projv::core::vec4 u_(float(snowlineAt()), 0.0f, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfSnow", u_); }
-    { projv::core::vec4 u_(L.glintBright, L.glintSharp, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfGlint", u_); }
     // The cloud-shadow map (cloud_shadow.frag): 32 km round the camera, its corner snapped to its texels.
     {
         const double size = 32000.0, texel = size / 256.0;
@@ -1378,6 +1520,20 @@ void render(projv::Application& app) {
     const vec3 air = sunIrradianceAt(st, st.camera.y + 6000.0);
     projv::core::vec4 mtnSunAir(air.x, air.y, air.z, 0.0f);
     projv::graphics::setUniformToValue(r, "mtnSunAir", mtnSunAir);
+    {
+        // The lean trace whenever nothing it leaves out is on (trace_lean.frag).
+        static const bool noLean = std::getenv("SANTA_FE_NO_LEAN") != nullptr;   // the full one always (to compare)
+        const bool lean = !noLean && (L.flags & (kDiffuse | kBounceSun | kShafts)) == 0;
+        const auto& passes = ri.getRendererSpecification(1).dependencyGraph.renderPasses;
+        // The sky's light (sky_dirs, sky_ambient: 0.36 ms, a march per direction) moves with the clouds' drift, not
+        // the frame: every fourth frame, and at once when the look changes. Off, a pass keeps what it last made.
+        const bool skyNow = reset || st.renderFrame % kSkyLightEvery == 0;
+        for (size_t v = 0; v < passes.size() && v < r->dependencyGraph.size(); ++v) {
+            if (passes[v].shaderID == kTraceShader) r->dependencyGraph[v].enabled = !lean;
+            if (passes[v].shaderID == kTraceLeanShader) r->dependencyGraph[v].enabled = lean;
+            if (passes[v].shaderID == kSkyDirsShader || passes[v].shaderID == kSkyAmbientShader) r->dependencyGraph[v].enabled = skyNow;
+        }
+    }
     projv::graphics::renderConstructedRenderer(ri, r, &gpu);
     ++st.renderFrame;
     ++st.accumulated;
@@ -1432,6 +1588,16 @@ void lookPanel(projv::Application& app) {
         bgfx::requestScreenShot(BGFX_INVALID_HANDLE, path.c_str());
         projv::core::info("[SANTA FE] saved {}", path);
     }
+    ImGui::TextUnformatted("weather:");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("clear")) applyWeather(L, Weather::Clear);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("scattered")) applyWeather(L, Weather::Scattered);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("overcast")) applyWeather(L, Weather::Overcast);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("storm")) applyWeather(L, Weather::Storm);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Presets: the clouds' cover, height, kind and rain, and the haze, together (santa-fe-reference S23f)");
     if (ImGui::Button("Optimized mode")) applyMode(L, true);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shadows, far trees, clouds, the air and the props; no traced sky light; cheaper clouds and detail");
     ImGui::SameLine();
@@ -1445,6 +1611,24 @@ void lookPanel(projv::Application& app) {
     ImGui::Checkbox("show where", &L.reconDebug);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Green: voxels rebuilt the pixel; red: it fell back to filtering; blue: sky");
     ImGui::SliderInt("max samples", &st.maxSamples, 1, 8192);
+    // How each layer reaches the window (santa-fe-reference S22b): one row each.
+    if (ImGui::CollapsingHeader("Upscale", ImGuiTreeNodeFlags_DefaultOpen)) {
+        static const char* kModes[] = {"reconstruct", "spatial", "temporal"};
+        static const char* kAOModes[] = {"per face", "spatial", "temporal"};
+        auto row = [&](const char* label, int* v, const char** names, const char* t) {
+            ImGui::Combo(label, v, names, 3);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", t);
+        };
+        row("colour", &L.upColour, kModes, "The sky light, the bounce, the air (and everything, in reference mode). Reconstruct: the voxels' own edges; spatial: smooth; temporal: jittered and accumulated");
+        row("sun", &L.upSun, kModes, "The sun's light (its visibility apart, below)");
+        row("reflections", &L.upReflect, kModes, "The glints' and the sheen's reflections (reflect.frag)");
+        row("shadow", &L.upShadow, kModes, "The sun's visibility: the hard shadow per voxel face, before the shadow filter");
+        ImGui::Checkbox("shadow filter (A-Trous)", &L.shadowFilter);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Soft shadows at the window's resolution: an A-Trous blur as wide as the penumbra (blocker distance x shadow softness); off: hard");
+        row("traced AO", &L.upAO, kAOModes, "Per face: every pixel of a voxel face takes the AO at its centre; spatial: per pixel; temporal: accumulated");
+        ImGui::Checkbox("AO filter (A-Trous)", &L.aoFilter);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("The traced AO's fixed rays, filtered over its surface (three A-Trous steps); the SSAO is per pixel, unfiltered");
+    }
 
     // One switch for each feature, in the section it belongs to (each label once: ImGui IDs).
     auto bit = [&](const char* label, uint32_t b, const char* tip) {    // the first word (SF_*)
@@ -1466,7 +1650,7 @@ void lookPanel(projv::Application& app) {
     }
     if (ImGui::CollapsingHeader("Shadows")) {
         bit("sun shadows", kShadows, "a shadow ray toward the sun from every hit");
-        bit("shadow blur (by distance)", kShadowBlur, "soft shadows from one hard ray, blurred in screen space, wider the farther the blocker (optimized mode)");
+        bit("sun apart (shadow filter)", kShadowBlur, "the sun's light apart from its hard shadow, for the shadow filter (Upscale) and the leaf light; off: the shadow as traced, in the colour (optimized mode)");
         ImGui::SliderFloat("blur softness", &L.shadowSoftness, 0.0f, 0.1f, "%.3f");
         bit("sun's disc (traced)", kSoftShadows, "the shadow ray aims at a random point of the sun's disc: soft shadows over many frames (reference mode)");
         ImGui::SliderFloat("sun disc (x real)", &L.sunDisc, 0.0f, 8.0f);
@@ -1492,12 +1676,13 @@ void lookPanel(projv::Application& app) {
     if (ImGui::CollapsingHeader("Sky light and AO")) {
         bit("sky light + bounce (traced)", kDiffuse, "a cosine-weighted ray from every hit: sky occlusion and one bounce (reference mode)");
         bit("bounce lit by the sun", kBounceSun, "a shadow ray from the bounce's hit (else the bounce is sky-lit only)");
-        bit2("AO (traced)", kAO, "one short traced ray per 2 x 2 texels (its own pass, accumulated over frames) for the sky light's occlusion (optimized mode)");
+        bit2("AO (traced)", kAO, "two short fixed rays per 2 x 2 texels (their own pass, filtered) for the sky light's occlusion, reaching further with distance (optimized mode)");
+        bit2("AO on the far field", kFarAO, "past the voxels: a horizon AO on the heightfield -- how high the land and its trees rise round each point (trace.frag sfFarAO, SF_FAR_AO_)");
+        bit2("sky light from the whole sky", kSkyLight, "with no diffuse ray: the sky light averaged over the whole hemisphere -- the horizon, the clouds, the plains below -- by the surface's facing (sky_ambient.frag); off: the sky in one direction");
         ImGui::SliderFloat("AO reach (m)", &L.aoReach, 1.0f, 20.0f);
         ImGui::SliderFloat("AO strength", &L.aoStrength, 0.0f, 1.0f);
         ImGui::SliderInt("AO steps", &L.aoSteps, 8, 128);
-        ImGui::SliderFloat("AO blur (texels)", &L.aoBlur, 0.0f, 8.0f);
-        ImGui::SliderFloat("AO out to (m)", &L.aoRange, 10.0f, 2000.0f, "%.0f");
+        ImGui::SliderFloat("AO out to (m)", &L.aoRange, 10.0f, 8000.0f, "%.0f");
         ImGui::Checkbox("screen-space AO", &L.ssao);
         tip("the creases under a texel of the traced AO, at full resolution");
         ImGui::SliderFloat("SSAO radius (m)", &L.ssaoRadius, 0.05f, 2.0f);
@@ -1520,10 +1705,8 @@ void lookPanel(projv::Application& app) {
         ImGui::SliderFloat("everything else: amount", &L.smoothMore, 0.0f, 1.0f);
         ImGui::SliderFloat("bevel width", &L.bevelWidth, 0.02f, 0.5f, "%.2f voxel");
         ImGui::SliderFloat("bevel strength", &L.bevelStrength, 0.0f, 2.0f);
-        bit("gloss (water, snow)", kGloss, "water mirrors the sky; snow's sheen");
-        bit2("sun glints", kGlints, "snow's crystals and the granite's mica flash the sun: a tiny mirror in each pixel-sized cell, tilted at random");
-        ImGui::SliderFloat("glint brightness", &L.glintBright, 0.0f, 100.0f);
-        ImGui::SliderFloat("glint sharpness", &L.glintSharp, 0.99f, 0.9999f, "%.4f");
+        bit("gloss (water, sheen)", kGloss, "water mirrors the sky; snow, rock and leaves a faint rough reflection of the sky (screen space; trace.frag SF_SHEEN_)");
+        bit2("sun glints", kGlints, "snow's crystals and the granite's mica: a few cells of a 16 x 16 grid on each voxel face are small tilted mirrors, showing the sun and (screen-space) what is round them; tuned in trace.frag (SF_GLINT_)");
         tip("how exactly a facet must lie between the sun and the eye: higher, fewer and finer");
         bit("props (rocks, shrubs, trees)", kProps, "the loose objects on every ray");
     }
@@ -1542,19 +1725,63 @@ void lookPanel(projv::Application& app) {
         ImGui::DragFloat("wind z (m)", &L.cloudWindZ, 50.0f);
         ImGui::SliderInt("cloud steps", &L.cloudSteps, 8, 128);
         ImGui::SliderInt("cloud light steps", &L.cloudLightSteps, 1, 6);
+        ImGui::SeparatorText("kind (Nubis)");
+        ImGui::SliderFloat("type", &L.cloudType, 0.0f, 1.0f);
+        tip("0 stratus (a flat, even sheet), 0.5 cumulus (heaps), 1 cumulonimbus (towers to the top, more cover)");
+        ImGui::SliderFloat("precipitation", &L.precipitation, 0.0f, 1.0f);
+        tip("rain clouds: denser, and darker through and through");
+        ImGui::SliderFloat("erosion", &L.cloudErosion, 0.0f, 1.0f);
+        tip("how much the fine noise eats the edges into wisps");
+        ImGui::SeparatorText("light (Unreal's volumetric clouds)");
+        ImGui::SliderFloat("phase G", &L.cloudG, -0.99f, 0.99f);
+        tip("the first lobe: positive scatters forward (a silver lining looking toward the sun)");
+        ImGui::SliderFloat("phase G2", &L.cloudG2, -0.99f, 0.99f);
+        tip("the second lobe: negative scatters back toward the sun");
+        ImGui::SliderFloat("phase blend", &L.cloudPhaseBlend, 0.0f, 1.0f);
+        ImGui::SliderFloat("powder", &L.cloudPowder, 0.0f, 1.0f);
+        tip("dark edges on the side facing the sun (Beer-powder)");
+        ImGui::SliderInt("multi-scattering octaves", &L.msOctaves, 0, 5);
+        ImGui::SliderFloat("ms contribution", &L.msContribution, 0.0f, 1.0f);
+        tip("how much each octave adds: higher, brighter hearts");
+        ImGui::SliderFloat("ms occlusion", &L.msOcclusion, 0.0f, 1.0f);
+        tip("how much less each octave is shadowed: higher, light reaches deeper");
+        ImGui::SliderFloat("ms eccentricity", &L.msEccentricity, 0.0f, 1.0f);
+        tip("how much each octave keeps the phase's direction (lower: more even)");
+        ImGui::SliderFloat("ambient", &L.cloudAmbient, 0.0f, 2.0f);
+        tip("the sky's fill light in the clouds");
+        ImGui::SliderFloat("ground contribution", &L.cloudGround, 0.0f, 2.0f);
+        tip("the land lighting the bases from below (in the clouds' own shadow)");
+        ImGui::SliderFloat("bottom occlusion", &L.cloudBottomOcclusion, 0.0f, 1.0f);
+        tip("a base sees the deck's underside, not the clear sky: under a thick deck the bases go dark");
+        ImGui::SliderFloat("air under clouds", &L.airUnderClouds, 0.0f, 1.0f);
+        tip("how much the clouds' shadow dims the air's own light (the distance's haze)");
     }
     if (ImGui::CollapsingHeader("Air and haze")) {
         bit("aerial perspective", kAerial, "the air between the camera and what it sees");
         ImGui::SliderFloat("air density", &L.air, 0.2f, 3.0f);
-        ImGui::SliderFloat("air haze", &L.airHaze, 0.0f, 2.0f);
+        ImGui::SliderFloat("air haze", &L.airHaze, 0.0f, 150.0f);
         bit("valley haze", kHaze, "height fog in the basin");
         ImGui::SliderFloat("haze density (/m)", &L.hazeDensity, 0.0f, 3e-4f, "%.6f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("haze base (m)", &L.hazeBase, 1000.0f, 3500.0f);
         ImGui::SliderFloat("haze scale height (m)", &L.hazeHeight, 50.0f, 3000.0f);
         ImGui::SliderFloat("haze forward scattering", &L.hazeG, 0.0f, 0.95f);
+        tip("the haze's phase (Unreal: scattering distribution): high, it glows toward the sun");
+        ImGui::SeparatorText("height fog (Unreal)");
+        ImGui::SliderFloat("second layer density (/m)", &L.fog2Density, 0.0f, 3e-4f, "%.6f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("second layer base (m)", &L.fog2Base, 1000.0f, 5000.0f);
+        ImGui::SliderFloat("second layer scale height (m)", &L.fog2Height, 50.0f, 4000.0f);
+        ImGui::SliderFloat("fog start distance (m)", &L.fogStart, 0.0f, 5000.0f);
+        ImGui::SliderFloat("fog max opacity", &L.fogMaxOpacity, 0.0f, 1.0f);
+        ImGui::SliderFloat("fog sky light", &L.fogSky, 0.0f, 3.0f);
+        tip("the sky's light in the haze (the scene's sky light: clouds and their shadow included)");
+        ImGui::SliderFloat("fog sun light", &L.fogSun, 0.0f, 3.0f);
+        tip("directional inscattering: the sun scattered toward the eye by the haze's phase, where the clouds let it");
+        ImGui::ColorEdit3("fog tint", L.fogTint);
+        ImGui::SliderFloat("fog albedo", &L.fogAlbedo, 0.0f, 1.0f);
+        tip("how much of what the haze stops it scatters (dust lower, water droplets near 1)");
         bit("haze shafts (traced)", kShafts, "one shadowed sample of the haze per pixel per frame");
         bit2("light shafts (screen space)", kGodRays, "rays from the sun past ridges, crowns and clouds");
-        ImGui::SliderFloat("shaft strength", &L.rayStrength, 0.0f, 2.0f);
+        ImGui::SliderFloat("shaft strength", &L.rayStrength, 0.0f, 0.3f);
         ImGui::SliderFloat("shaft decay", &L.rayDecay, 0.85f, 1.0f, "%.3f");
         ImGui::SliderFloat("shaft length", &L.rayLength, 0.2f, 1.0f);
         bit2("dust and pollen", kMotes, "motes drifting in the air near you, bright in the sun's direction");
@@ -1578,12 +1805,8 @@ void lookPanel(projv::Application& app) {
         if (ImGui::Combo("block", &idx, names, 4)) L.blockFactor = 1 << idx;
     }
     if (ImGui::CollapsingHeader("Display")) {
-        ImGui::SliderFloat("glow strength", &L.glow, 0.0f, 1.0f);
-        ImGui::SliderFloat("glow threshold", &L.glowThreshold, 0.5f, 10.0f);
-        tip("how bright (after exposure) a thing must be to glow");
-        ImGui::SliderFloat("glow knee", &L.glowKnee, 0.05f, 4.0f);
-        tip("how gradually the glow comes in round the threshold");
-        ImGui::SliderFloat("glow spread", &L.glowSpread, 0.5f, 8.0f);
+        ImGui::SliderFloat("bloom", &L.glow, 0.0f, 0.3f);
+        tip("the bloom's share of the image (restir-pt's chain: five levels, no threshold -- every bright thing glows in proportion, nothing gets a halo of its own)");
         ImGui::SliderFloat("vignette", &L.vignette, 0.0f, 1.0f);
         ImGui::SliderFloat("contrast", &L.contrast, 0.7f, 1.5f);
         ImGui::SliderFloat("saturation", &L.saturation, 0.0f, 2.0f);
@@ -1631,6 +1854,10 @@ void startup(projv::Application& app) {
     // SANTA_FE_MODE=reference for everything at full quality; optimized by default.
     applyMode(st.look, !(std::getenv("SANTA_FE_MODE") && std::string(std::getenv("SANTA_FE_MODE")) == "reference"));
     if (const char* f = std::getenv("SANTA_FE_SCALE")) st.look.renderScale = float(std::atof(f));
+    if (const char* w = std::getenv("SANTA_FE_WEATHER")) {   // clear, scattered, overcast, storm (S23f)
+        const std::string k = w;
+        applyWeather(st.look, k == "clear" ? Weather::Clear : k == "overcast" ? Weather::Overcast : k == "storm" ? Weather::Storm : Weather::Scattered);
+    }
     if (std::getenv("SANTA_FE_RECON_DEBUG")) st.look.reconDebug = true;
     if (const char* f2 = std::getenv("SANTA_FE_FLAGS2")) st.look.flags2 = uint32_t(std::strtoul(f2, nullptr, 0));
     if (std::getenv("SANTA_FE_BLOCKY")) { st.look.flags |= kFarBlocky; st.look.flags2 |= kCloudBlocky; }
@@ -1641,20 +1868,31 @@ void startup(projv::Application& app) {
     if (const char* v = std::getenv("SANTA_FE_SHADOW_VOXELS")) st.look.shadowVoxels = float(std::atof(v));
     if (const char* v = std::getenv("SANTA_FE_SHADOW_LOD")) st.look.shadowLODVoxels = float(std::atof(v));
     if (std::getenv("SANTA_FE_NO_SSAO")) st.look.ssao = false;
-    if (const char* g = std::getenv("SANTA_FE_GLINT")) std::sscanf(g, "%f,%f", &st.look.glintBright, &st.look.glintSharp);
     if (std::getenv("SANTA_FE_FACE")) st.look.flags = std::atoi(std::getenv("SANTA_FE_FACE")) ? (st.look.flags | kFaceShading) : (st.look.flags & ~uint32_t(kFaceShading));
     if (const char* f = std::getenv("SANTA_FE_FLAGS")) st.look.flags = uint32_t(std::strtoul(f, nullptr, 0));
     if (const char* f = std::getenv("SANTA_FE_OFF")) st.look.flags &= ~uint32_t(std::strtoul(f, nullptr, 0));
+    if (const char* f = std::getenv("SANTA_FE_OFF2")) st.look.flags2 &= ~uint32_t(std::strtoul(f, nullptr, 0));
     st.look.exposure = kExposure;
     st.captureSamples = std::max(1, envInt("SANTA_FE_SAMPLES", 256));
-    if (std::getenv("SANTA_FE_BENCH")) {
-        st.bench.push_back({"all on", kAllFeatures});
+    if (const char* benchMode = std::getenv("SANTA_FE_BENCH")) {
+        // SANTA_FE_BENCH=optimized: the optimized preset's cases only; =preset: that one case and its passes (for
+        // an A/B of a shader change); anything else: every case.
+        const std::string mode = benchMode;
         st.bench.push_back({"optimized preset", kOptimizedFlags});
-        for (const FeatureName& f : kFeatureNames)
-            if (kOptimizedFlags & f.bit) st.bench.push_back({std::string("optimized - ") + f.name, kOptimizedFlags & ~uint32_t(f.bit)});
-        st.bench.push_back({"nothing (skip only)", kSkip});
-        for (const FeatureName& f : kFeatureNames) st.bench.push_back({std::string("- ") + f.name, kAllFeatures & ~uint32_t(f.bit)});
-        st.bench.push_back({"all on (again)", kAllFeatures});
+        if (mode == "preset") { st.benchSettle = 30; st.benchFrames = 330; }
+        if (mode != "preset" && mode != "optimized") st.bench.insert(st.bench.begin(), {"all on", kAllFeatures});
+        if (mode != "preset") {
+            for (const FeatureName& f : kFeatureNames)
+                if (kOptimizedFlags & f.bit) st.bench.push_back({std::string("optimized - ") + f.name, kOptimizedFlags & ~uint32_t(f.bit)});
+            for (const FeatureName2& f : kFeatureNames2)
+                st.bench.push_back({std::string("optimized - ") + f.name, kOptimizedFlags, uint32_t(f.bit)});
+            st.bench.push_back({"optimized preset (again)", kOptimizedFlags});
+        }
+        if (mode != "preset" && mode != "optimized") {
+            st.bench.push_back({"nothing (skip only)", kSkip});
+            for (const FeatureName& f : kFeatureNames) st.bench.push_back({std::string("- ") + f.name, kAllFeatures & ~uint32_t(f.bit)});
+            st.bench.push_back({"all on (again)", kAllFeatures});
+        }
     }
     std::filesystem::current_path(projv::core::executableDirectory());   // renderer/ names its shaders from here
     const char* which = std::getenv("MOUNTAINS_RENDERER");
@@ -1665,6 +1903,7 @@ void startup(projv::Application& app) {
         app.world.ctx().emplace<projv::GPUData>(projv::graphics::createTexturesForScene(scene));
         app_gpu = &app.world.ctx().get<projv::GPUData>();
         if (const char* cap = std::getenv("MOUNTAINS_CAPTURE")) st.capturePath = cap;
+    if (const char* d = std::getenv("SANTA_FE_DUMP_GBUFFER")) st.dumpPath = d;
         else projv::graphics::setCursorCaptured(app, ri, true);
 #ifdef PROJV_UI
         projv::ui::dev::addPanel(app, "Santa Fe", lookPanel);
@@ -1956,12 +2195,42 @@ void stream(projv::Application& app) {
                 st.profiling = false;
                 reportPasses(st, app.world.ctx().get<projv::graphics::RenderInstance>());
                 bgfx::requestScreenShot(BGFX_INVALID_HANDLE, st.capturePath.c_str());
+                if (!st.dumpPath.empty()) dumpGBufferStart(st);
                 st.captureStage = 2;
             }
         } else if (++st.captureStage > 12) {
+            if (!st.dumpPath.empty()) dumpGBufferWrite(st);
             app.closeRequested = true;
         }
     }
+}
+
+// SANTA_FE_DUMP_GBUFFER (S27b0): the trace's gPos (texture 5: w the hit distance) and gFace (7: a voxel
+// face's centre and edge) copied to read-back textures and read once, written as a raw file: "w h" then w*h
+// RGBA32F of each. A one-off -- readTexture waits for the GPU (bgfx-vk), so never per frame.
+void dumpGBufferStart(State& st) {
+    auto& tx = st.renderer->resources.textures;
+    const projv::core::ivec2 res = tx.textureResolutions.at(5);
+    st.dumpW = res.x;
+    st.dumpH = res.y;
+    const uint32_t ids[2] = {5, 7};
+    for (int i = 0; i < 2; i++) {
+        st.dumpTex[i] = bgfx::createTexture2D(uint16_t(res.x), uint16_t(res.y), false, 1, bgfx::TextureFormat::RGBA32F,
+                                              BGFX_TEXTURE_BLIT_DST | BGFX_TEXTURE_READ_BACK);
+        st.dumpData[i].assign(size_t(res.x) * res.y * 4, 0.0f);
+        bgfx::blit(kBlitView, st.dumpTex[i], 0, 0, tx.textureHandles.at(ids[i]));
+        bgfx::readTexture(st.dumpTex[i], st.dumpData[i].data());
+    }
+}
+
+void dumpGBufferWrite(State& st) {
+    if (FILE* f = std::fopen(st.dumpPath.c_str(), "wb")) {
+        std::fprintf(f, "%d %d\n", st.dumpW, st.dumpH);
+        for (int i = 0; i < 2; i++) std::fwrite(st.dumpData[i].data(), sizeof(float), st.dumpData[i].size(), f);
+        std::fclose(f);
+        projv::core::info("[SANTA FE] g-buffer {}x{} -> {}", st.dumpW, st.dumpH, st.dumpPath);
+    }
+    for (auto& t : st.dumpTex) if (bgfx::isValid(t)) bgfx::destroy(t);
 }
 
 void shutdown(projv::Application& app) {

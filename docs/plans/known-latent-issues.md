@@ -368,3 +368,37 @@ by the real clock) the piece is big enough, but `./physics --headless` (one step
 2026-11-05 support change alike. "F's shards went on through the wall" (more than 60% of them) is as
 borderline: 50-60% in some windowed runs. Fix: build the walker's obstacle and the shards' target
 for the test (a piece of known size, a strike of known energy) rather than picking from what F made.
+
+## 28. The NVIDIA driver's shader compiler dies with SIGBUS in the Santa Fe demo
+
+Found 2026-11-23 in `examples/56-santa-fe` (`./santa_fe`, commit `1c17693`), on the NVIDIA 580.119.02
+driver. After about 90 s still on the Plaza (11.7 ms/frame, every ring generated) the camera flew ~6 km
+east and up to 4 km; as it slowed and ~1,400 chunks streamed back in, the process died of SIGBUS
+(exit 135). The faulting thread was in the driver's SPIR-V compiler (`libnvidia-glcore` ->
+`libnvidia-glvkspirv` `_nv002nvvm` -> `libnvidia-gpucomp`), building a pipeline; every engine thread
+was idle in its pool. The same code has run hundreds of times on an AMD laptop with no crash, so it is
+taken as a driver bug, like #25. The driver's shader cache (`~/.cache/nvidia`, 1.1 GB, over its
+default limit) was cleared afterwards in case a truncated cache file was involved; whether that matters
+is not known: the next run, on an empty cache, died after ~4 min instead (SIGSEGV, exit 139), after
+flying ~8 km east at 3 km, again with every ring generated -- this time on bgfx's render thread inside
+`vkQueueSubmit` (`libnvidia-glcore`, from `bgfx::vk::CommandQueueVK::kick`, `renderer_vk.h:313`). The
+kernel logged no Xid for either. A third (S21's build, after three clean capture runs of it): SIGSEGV 10 s in,
+on the Plaza with every ring just generated, the faulting frame in `libnvidia-glvkspirv` (the stack
+unreadable below it); the relaunch died ~3 min in, after a flight to the snow 12 km out, in
+`bgfx::vk::SwapChainVK::present` (`libnvidia-glcore`) -- the site #25 sees on exit. A fifth (S21 with the rock shine, 2026-11-24): after ~2 hours idle on the Plaza with no
+trouble, SIGSEGV once the camera flew far out to the mountains (chunks streaming in), on a driver thread in `libnvidia-glvkspirv` (`_nv002nvvm`, from `libnvidia-glcore`):
+the compiler again, now with a readable stack. A sixth (S22, 2026-11-24): the same frame in `libnvidia-glvkspirv`, ~1 min in while the user switched the
+panel's settings (camera still, 3 km up) -- a setting that changes the passes' state compiles pipelines late. A seventh: at start-up, compiling a rebuilt trace.frag
+(`libnvidia-glvkspirv`); the same build started cleanly the next time. Next step: `__GL_SHADER_DISK_CACHE=0`, and find which pipeline is compiled
+that late (a bgfx pipeline made on first use of a new state or framebuffer size).
+
+## 29. Santa Fe passes bind more inputs than fit below the scene's sampler stages
+
+`./santa_fe` warns at start-up that some passes bind more than the 9 input textures that fit below the scene's
+stages (9..15; `src/graphics/perform_renderer.cpp`, `PROJV_MAX_PASS_SAMPLERS`): since S23 `reflect.frag` binds 13,
+`clouds.frag` 11 (gPos and gNormal through fbo 17, its own two, six far-field textures, the sky's light),
+`shadow_soft.frag` and `display.frag` 11, `glow.frag` and `resolve.frag` 10. The engine binds
+the scene's textures first, so a pass's own inputs win the collision and only the scene textures on those stages
+are lost; none of these passes reads the scene, so nothing is drawn wrong today. It becomes a bug if one of them starts to
+trace the voxels. Fix if so: fewer inputs (split the trace's eight targets, or read what is needed from a smaller
+target).

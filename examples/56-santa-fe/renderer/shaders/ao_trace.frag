@@ -4,15 +4,13 @@ $input v_texcoord0
 // =============================================================================
 // ao_trace.frag -- the traced AO at half the trace's resolution (santa-fe-reference S18).
 //
-// One short cosine-weighted ray a texel from the trace's hit (gPos, gNormal), voxels and props only, capped
-// in reach (sfAO.x) and steps (sfAO.z), out to sfAO.w metres from the camera. A quarter of the trace's
-// texels, so a quarter of the rays it cost inside trace.frag; and out of the trace, its march no longer
-// widens the trace's registers. Its answers accumulate here over frames (reprojected by the trace's motion,
-// dropped where the depth disagrees); shadow_soft upsamples them along surfaces and multiplies in a
-// screen-space AO for the detail under a texel of this.
+// SF_AO_RAYS short cosine-weighted rays a texel from the trace's hit (gPos, gNormal), voxels and props only,
+// capped in reach (sfAO.x) and steps (sfAO.z), out to sfAO.w metres from the camera. A quarter of the trace's
+// texels. The rays are fixed to the ground (S22d: nothing random per frame, nothing kept between frames);
+// ao_atrous.sc filters them, and resolve.frag holds the result per voxel face and multiplies in a
+// screen-space AO per pixel.
 //
-// Inputs: the trace pass (gPos 1, gNormal 2, gMotion 5), this pass's last output (7).
-// Output: r the AO (1 open), g the depth it is for, b how many frames it holds.
+// Inputs: the trace pass (gPos 1, gNormal 2). Output: r the AO (1 open), g the depth it is for.
 // =============================================================================
 
 #include <bgfx_shader.sh>
@@ -21,17 +19,17 @@ $input v_texcoord0
 #include <pjv_scene.sc>
 #include <pjv_camera.sc>
 
-uniform vec4 frameCount;     // x: frame index
 uniform vec4 sfAO;           // x reach (m), y strength, z steps, w out to (m)
-uniform vec4 sfTemporal;     // x: reset
 uniform vec4 sfFlags;        // y bit 7: SF2_AO; x 32768: props (SF_PROPS)
 
 SAMPLER2D(gPos, 1);
 SAMPLER2D(gNormal, 2);
-SAMPLER2D(gMotion, 5);
-SAMPLER2D(aoHist, 7);
 
 #define PI 3.14159265358979
+#define SF_AO_RAYS 2   // rays a texel
+// The reach grows with distance (santa-fe-reference S22, distant AO): sfAO.x metres near, this share of the distance
+// far -- a 6 m ray is under a pixel a kilometre out, and a distant slope or crown would get no occlusion at all.
+#define SF_AO_REACH_PER_M 0.012
 
 uint aoHash(uint x) {
     x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
@@ -57,36 +55,36 @@ void main() {
         return;
     }
 
-    // ---- One AO ray ----
-    ivec2 pix = ivec2(gl_FragCoord.xy);
-    uint h = aoHash(uint(pix.x) * 1973u + uint(pix.y) * 9277u + uint(frameCount.x) * 26699u);
-    float u1 = float(h & 0xffffu) / 65536.0, u2 = float(h >> 16u) / 65536.0;
-    vec3 d = aoCosineDir(nf, u1, u2);
-    PjvRay ray;
-    ray.origin = p.xyz + nf * max(0.01, p.w * 0.0004);
-    ray.direction = d;
-    PjvRayQuery rq = pjvPrimaryQuery(100u);
-    rq.maxRaySteps = uint(sfAO.z);
-    rq.startLOD = 0u;
-    rq.finishLOD = 2u;
-    rq.distanceToFinishLOD = 24u;
-    rq.maxDistance = sfAO.x;
-    pjvQueryLooseReach(rq, (uint(sfFlags.x + 0.5) & 32768u) != 0u ? sfAO.x : 0.0);
-    PjvSceneIntersectData found = pjvRaySceneIntersect(ray, rq).hit;
-    bool hit = !(found.foundBox.size < 0.0 || found.rayT <= 0.0 || dot(found.normal, found.normal) < 0.5) && found.rayT < sfAO.x;
-    float ao = hit ? mix(1.0, pow(clamp(found.rayT / max(sfAO.x, 1e-3), 0.0, 1.0), 0.6), sfAO.y) : 1.0;
-
-    // ---- Over frames: where this ground was last frame, if the depth agrees ----
-    vec2 then = uv + texelFetch(gMotion, g, 0).xy;
-    float n = 0.0;
-    float acc = ao;
-    if (sfTemporal.x < 0.5 && all(greaterThan(then, vec2(0.0, 0.0))) && all(lessThan(then, vec2(1.0, 1.0)))) {
-        ivec2 hsize = ivec2(textureSize(aoHist, 0));
-        vec4 hist = texelFetch(aoHist, clamp(ivec2(then * vec2(hsize)), ivec2(0, 0), hsize - 1), 0);
-        if (hist.b > 0.0 && abs(hist.g - p.w) < max(0.04 * p.w, 0.1)) {
-            n = min(hist.b, 15.0);
-            acc = (hist.r * n + ao) / (n + 1.0);
-        }
+    // ---- Two AO rays, fixed: their directions come from where this texel's ground is, quantized to about its
+    // own size (a power of two, so the cells hold still), never from the frame. The same ground asks the same
+    // rays every frame; ao_atrous.sc filters the pattern away. ----
+    float texelWorld = max(p.w, 1e-3) * 2.0 * pjvViewTanHalfFov() / float(gsize.y) * 2.0;
+    float cellSize = exp2(ceil(log2(max(texelWorld, 1e-3))));
+    ivec3 cell = ivec3(floor((p.xyz + nf * (cellSize * 0.5)) / cellSize));
+    uint h = aoHash(uint(cell.x) * 1973u ^ aoHash(uint(cell.y) * 9277u ^ aoHash(uint(cell.z) * 26699u)));
+    float reach = max(sfAO.x, p.w * SF_AO_REACH_PER_M);
+    float ao = 0.0;
+    for (int k = 0; k < SF_AO_RAYS; k++) {
+        uint hk = aoHash(h + uint(k) * 0x9e3779b9u);
+        // Stratified: ray k takes its share of the cosine lobe's radius, and the turn opposite the last.
+        float u1 = (float(k) + float(hk & 0xffffu) / 65536.0) / float(SF_AO_RAYS);
+        float u2 = fract(float(hk >> 16u) / 65536.0 + float(k) / float(SF_AO_RAYS));
+        vec3 d = aoCosineDir(nf, u1, u2);
+        PjvRay ray;
+        ray.origin = p.xyz + nf * max(0.01, p.w * 0.0004);
+        ray.direction = d;
+        PjvRayQuery rq = pjvPrimaryQuery(100u);
+        rq.maxRaySteps = uint(sfAO.z);
+        rq.startLOD = 0u;
+        rq.finishLOD = 2u;
+        rq.distanceToFinishLOD = 24u;
+        rq.maxDistance = reach;
+        pjvQueryLooseReach(rq, (uint(sfFlags.x + 0.5) & 32768u) != 0u ? min(reach, sfAO.x * 2.0) : 0.0);
+        PjvSceneIntersectData found = pjvRaySceneIntersect(ray, rq).hit;
+        bool hit = !(found.foundBox.size < 0.0 || found.rayT <= 0.0 || dot(found.normal, found.normal) < 0.5) && found.rayT < reach;
+        ao += hit ? mix(1.0, pow(clamp(found.rayT / max(reach, 1e-3), 0.0, 1.0), 0.6), sfAO.y) : 1.0;
     }
-    gl_FragColor = vec4(acc, p.w, n + 1.0, 1.0);
+    // Faded out over the last fifth of the range, not cut.
+    ao = mix(ao / float(SF_AO_RAYS), 1.0, smoothstep(0.8 * sfAO.w, sfAO.w, p.w));
+    gl_FragColor = vec4(ao, p.w, 0.0, 1.0);
 }

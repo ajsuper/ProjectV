@@ -65,6 +65,10 @@
             "type": "vec4"
         },
         {
+            "name": "mtnTrees",
+            "type": "vec4"
+        },
+        {
             "name": "mtnClouds",
             "type": "vec4"
         },
@@ -106,10 +110,6 @@
         },
         {
             "name": "sfShadow",
-            "type": "vec4"
-        },
-        {
-            "name": "sfGlow",
             "type": "vec4"
         },
         {
@@ -165,7 +165,43 @@
             "type": "vec4"
         },
         {
-            "name": "sfGlint",
+            "name": "sfUpscale",
+            "type": "vec4"
+        },
+        {
+            "name": "sfUpscale2",
+            "type": "vec4"
+        },
+        {
+            "name": "sfOvercast",
+            "type": "vec4"
+        },
+        {
+            "name": "sfCloudPhase",
+            "type": "vec4"
+        },
+        {
+            "name": "sfCloudMS",
+            "type": "vec4"
+        },
+        {
+            "name": "sfCloudAmb",
+            "type": "vec4"
+        },
+        {
+            "name": "sfCloudType",
+            "type": "vec4"
+        },
+        {
+            "name": "sfFog2",
+            "type": "vec4"
+        },
+        {
+            "name": "sfFog3",
+            "type": "vec4"
+        },
+        {
+            "name": "sfFogTint",
             "type": "vec4"
         }
     ],
@@ -209,6 +245,94 @@
         {
             "shaderID": 10,
             "path": "./renderer/shaders/ao_trace.bin"
+        },
+        {
+            "shaderID": 11,
+            "path": "./renderer/shaders/reflect.bin"
+        },
+        {
+            "shaderID": 12,
+            "path": "./renderer/shaders/shadow_prep.bin"
+        },
+        {
+            "shaderID": 13,
+            "path": "./renderer/shaders/shadow_atrous1.bin"
+        },
+        {
+            "shaderID": 14,
+            "path": "./renderer/shaders/shadow_atrous2.bin"
+        },
+        {
+            "shaderID": 15,
+            "path": "./renderer/shaders/shadow_atrous4.bin"
+        },
+        {
+            "shaderID": 16,
+            "path": "./renderer/shaders/shadow_atrous8.bin"
+        },
+        {
+            "shaderID": 17,
+            "path": "./renderer/shaders/ao_atrous1.bin"
+        },
+        {
+            "shaderID": 18,
+            "path": "./renderer/shaders/ao_atrous2.bin"
+        },
+        {
+            "shaderID": 19,
+            "path": "./renderer/shaders/ao_atrous4.bin"
+        },
+        {
+            "shaderID": 20,
+            "path": "./renderer/shaders/sky_ambient.bin"
+        },
+        {
+            "shaderID": 21,
+            "path": "./renderer/shaders/sky_dirs.bin"
+        },
+        {
+            "shaderID": 22,
+            "path": "./renderer/shaders/bloom_down1.bin"
+        },
+        {
+            "shaderID": 23,
+            "path": "./renderer/shaders/bloom_down2.bin"
+        },
+        {
+            "shaderID": 24,
+            "path": "./renderer/shaders/bloom_down3.bin"
+        },
+        {
+            "shaderID": 25,
+            "path": "./renderer/shaders/bloom_down4.bin"
+        },
+        {
+            "shaderID": 26,
+            "path": "./renderer/shaders/bloom_down5.bin"
+        },
+        {
+            "shaderID": 27,
+            "path": "./renderer/shaders/bloom_up4.bin"
+        },
+        {
+            "shaderID": 28,
+            "path": "./renderer/shaders/bloom_up3.bin"
+        },
+        {
+            "shaderID": 29,
+            "path": "./renderer/shaders/bloom_up2.bin"
+        },
+        {
+            "shaderID": 30,
+            "path": "./renderer/shaders/bloom_up1.bin"
+        },
+        {
+            "shaderID": 31,
+            "path": "./renderer/shaders/cloud_temporal.bin"
+        },
+        {
+            "shaderID": 32,
+            "path": "./renderer/shaders/trace_lean.bin"
         }
     ],
     "textures": [
@@ -330,15 +454,6 @@
             "origin": "CreateNew"
         },
         {
-            "texID": 20,
-            "name": "farMax",
-            "format": "R32_FLOAT",
-            "resX": 96,
-            "resY": 16,
-            "sizeMode": "fixed",
-            "origin": "CPUBuffer"
-        },
-        {
             "texID": 11,
             "name": "gSun",
             "format": "RGBA16_FLOAT",
@@ -418,6 +533,232 @@
             "sizeMode": "relative",
             "scale": 0.25,
             "origin": "CreateNew"
+        },
+        {
+            "texID": 26,
+            "name": "gGloss",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 27,
+            "name": "reflection",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 28,
+            "name": "history",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 29,
+            "name": "sunLayer",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 30,
+            "name": "reflVis",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 31,
+            "name": "aux",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 32,
+            "name": "rSun",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 33,
+            "name": "rReflVis",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 34,
+            "name": "rAux",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 35,
+            "name": "rFace",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 36,
+            "name": "rND",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 37,
+            "name": "shadowA",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 38,
+            "name": "shadowB",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 1.0,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 39,
+            "name": "aoA",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.25,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 40,
+            "name": "aoB",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.25,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 41,
+            "name": "skyAmbient",
+            "format": "RGBA32_FLOAT",
+            "resX": 8,
+            "resY": 1,
+            "sizeMode": "fixed",
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 42,
+            "name": "skyDirs",
+            "format": "RGBA32_FLOAT",
+            "resX": 64,
+            "resY": 7,
+            "sizeMode": "fixed",
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 43,
+            "name": "bloomDown1",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 44,
+            "name": "bloomDown2",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.25,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 45,
+            "name": "bloomDown3",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.125,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 46,
+            "name": "bloomDown4",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.0625,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 47,
+            "name": "bloomDown5",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.03125,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 48,
+            "name": "bloomUp4",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.0625,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 49,
+            "name": "bloomUp3",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.125,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 50,
+            "name": "bloomUp2",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.25,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 51,
+            "name": "bloomUp1",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.5,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 52,
+            "name": "cloudsT",
+            "format": "RGBA16_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.25,
+            "origin": "CreateNew"
+        },
+        {
+            "texID": 53,
+            "name": "cloudDepthT",
+            "format": "RGBA32_FLOAT",
+            "sizeMode": "relative",
+            "scale": 0.25,
+            "origin": "CreateNew"
         }
     ],
     "framebuffers": [
@@ -436,25 +777,35 @@
                 7,
                 8,
                 9,
-                11
+                11,
+                26
             ]
         },
         {
             "fboID": 3,
             "textureIDs": [
-                10
+                10,
+                32,
+                33,
+                34,
+                35,
+                36
             ]
         },
         {
             "fboID": 4,
             "textureIDs": [
-                4
+                4,
+                28
             ]
         },
         {
             "fboID": 5,
             "textureIDs": [
                 12,
+                29,
+                30,
+                31,
                 21,
                 22,
                 23
@@ -483,6 +834,116 @@
             "fboID": 9,
             "textureIDs": [
                 25
+            ]
+        },
+        {
+            "fboID": 10,
+            "textureIDs": [
+                27
+            ]
+        },
+        {
+            "fboID": 11,
+            "textureIDs": [
+                39
+            ]
+        },
+        {
+            "fboID": 12,
+            "textureIDs": [
+                40
+            ]
+        },
+        {
+            "fboID": 13,
+            "textureIDs": [
+                37
+            ]
+        },
+        {
+            "fboID": 14,
+            "textureIDs": [
+                38
+            ]
+        },
+        {
+            "fboID": 15,
+            "textureIDs": [
+                41
+            ]
+        },
+        {
+            "fboID": 16,
+            "textureIDs": [
+                42
+            ]
+        },
+        {
+            "fboID": 17,
+            "textureIDs": [
+                5,
+                6
+            ]
+        },
+        {
+            "fboID": 18,
+            "textureIDs": [
+                43
+            ]
+        },
+        {
+            "fboID": 19,
+            "textureIDs": [
+                44
+            ]
+        },
+        {
+            "fboID": 20,
+            "textureIDs": [
+                45
+            ]
+        },
+        {
+            "fboID": 21,
+            "textureIDs": [
+                46
+            ]
+        },
+        {
+            "fboID": 22,
+            "textureIDs": [
+                47
+            ]
+        },
+        {
+            "fboID": 23,
+            "textureIDs": [
+                48
+            ]
+        },
+        {
+            "fboID": 24,
+            "textureIDs": [
+                49
+            ]
+        },
+        {
+            "fboID": 25,
+            "textureIDs": [
+                50
+            ]
+        },
+        {
+            "fboID": 26,
+            "textureIDs": [
+                51
+            ]
+        },
+        {
+            "fboID": 29,
+            "textureIDs": [
+                52,
+                53
             ]
         }
     ]

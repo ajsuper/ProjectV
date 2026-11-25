@@ -29,6 +29,22 @@ uniform vec4 mtnSunAir; // rgb: the sun's irradiance up in the air that scatters
 uniform vec4 mtnAtmos;  // x: air density (1 = sea-level standard); y: haze density; z: haze anisotropy g;
                         // w: multiple scattering's share
 
+// The sky's light as the scene sees it, under its clouds (santa-fe-reference S23): sky_ambient.frag's 8 x 1 --
+// texels 0-5 the cosine-weighted mean radiance of the hemisphere round +x, -x, +y, -y, +z, -z (sky, clouds, land),
+// texel 6 r the sun's mean transmittance through the clouds over the land round the camera, a 1 once written.
+// A pass that binds it defines SF_SKY_TEX_SLOT before including this; the others see the clear sky. (It was read
+// back to the CPU as uniforms at first: bgfx's Vulkan readTexture waits for the GPU to go idle -- a spike every
+// readback.)
+uniform vec4 sfOvercast;  // y: how much the clouds' shadow dims the air's light (aerial perspective)
+#ifdef SF_SKY_TEX_SLOT
+SAMPLER2D(skyAmbient, SF_SKY_TEX_SLOT);
+vec4 mtnSkyTexel(int i) { return texelFetch(skyAmbient, ivec2(i, 0), 0); }
+bool mtnSkyCubeReady() { vec4 t = mtnSkyTexel(6); return t.a > 0.5 && t.a < 1.5 && t.r >= 0.0 && t.r <= 1.0; }
+#else
+vec4 mtnSkyTexel(int i) { return vec4(0.0, 0.0, 0.0, 0.0); }
+bool mtnSkyCubeReady() { return false; }
+#endif
+
 #define SUN_DIR   (sunDir.xyz)
 #define SUN_COLOR (mtnSun.rgb)
 
@@ -65,6 +81,29 @@ void mtnAtmosphere(vec3 origin, vec3 dir, float d, out vec3 T, out vec3 L) {
     L = mtnSunAir.rgb * (single + multi);
 }
 
+// How much of the sun reaches the land round the camera (the clouds' shadow on it, on average): its bounce.
+float mtnGroundLit() { return mtnSkyCubeReady() ? mtnSkyTexel(6).r : 1.0; }
+
+// The land's light thrown up (a level surface's view of the ground below): the sun on it, in the clouds' shadow,
+// and the sky's light on it (the ambient cube overhead: under an overcast, most of what lights the land).
+vec3 mtnGroundUp() {
+    vec3 sky = mtnSkyCubeReady() ? mtnSkyTexel(2).rgb : vec3(0.0, 0.0, 0.0);
+    return MTN_GROUND_ALBEDO * (SUN_COLOR * max(SUN_DIR.y, 0.0) * 0.3183 * mtnGroundLit() + sky);
+}
+
+// The sky's light on a surface facing n: the ambient cube, weighed by the normal (S22 / S23).
+vec3 mtnSkyCube(vec3 n) {
+    vec3 w = n * n;
+    vec3 x = mtnSkyTexel(n.x >= 0.0 ? 0 : 1).rgb;
+    vec3 y = mtnSkyTexel(n.y >= 0.0 ? 2 : 3).rgb;
+    vec3 z = mtnSkyTexel(n.z >= 0.0 ? 4 : 5).rgb;
+    return (x * w.x + y * w.y + z * w.z) / max(w.x + w.y + w.z, 1e-6);
+}
+
+// The air's own light under the clouds: what it scatters toward the eye is sunlight, and under a deck less of it
+// reaches the air (sfOvercast.y of the land's dimming; the sky above stays as it is).
+float mtnAirLit() { return mix(1.0, mtnGroundLit(), sfOvercast.y); }
+
 // The sky as seen: the air to the top of the atmosphere (or far off along the horizon), and the sun.
 vec3 mtnSkyView(vec3 dir) {
     vec3 T, L;
@@ -77,7 +116,7 @@ vec3 mtnSkyView(vec3 dir) {
 
 // The light arriving from a direction, for the ambient term: the sky above, the sunlit ground below.
 vec3 skyColor(vec3 dir) {
-    if (dir.y < 0.0) return MTN_GROUND_ALBEDO * SUN_COLOR * max(SUN_DIR.y, 0.0) * 0.3183;
+    if (dir.y < 0.0) return mtnGroundUp();
     vec3 T, L;
     mtnAtmosphere(pjvViewPosition(), dir, 1.0e6, T, L);
     return L;
@@ -89,15 +128,15 @@ vec3 mtnSkyFrom(vec3 origin, vec3 dir) {
     vec3 T, L;
     float d = dir.y > 0.0 ? 1.0e6 : 4.0e5;
     mtnAtmosphere(origin, dir, d, T, L);
-    if (dir.y <= 0.0) L += T * MTN_GROUND_ALBEDO * SUN_COLOR * max(SUN_DIR.y, 0.0) * 0.3183;
+    if (dir.y <= 0.0) L += T * mtnGroundUp();
     return L;
 }
 
-// A surface seen through `d` metres of air.
+// A surface seen through `d` metres of air (its light dimmed under the clouds, mtnAirLit).
 vec3 mtnAerial(vec3 colour, vec3 origin, vec3 dir, float d) {
     vec3 T, L;
     mtnAtmosphere(origin, dir, d, T, L);
-    return colour * T + L;
+    return colour * T + L * mtnAirLit();
 }
 
 #endif

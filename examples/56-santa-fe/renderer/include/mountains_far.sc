@@ -7,12 +7,15 @@
 //   farHeight  R32F   the ground's height (no canopy)
 //   farColour  RGBA8  rgb the ground's colour (soil, grass, rock, snow: everything but the trees), sRGB;
 //                     a the canopy cover, 0..1
-//   farCanopy  RGBA8  rgb the canopy's colour, sRGB; a: bit 7 conifers (pointed crowns), bits 0-6 the
-//                     trees' height in 0.35 m steps
+//   farCanopy  RGBA8  rgb the canopy's colour, sRGB; a: the trees' species A (bits 0-2), B (3-5) and B's
+//                     share in thirds (6-7): MTN_SP_*
 //
-// The trees are geometry (R7): crowns on a jittered grid of mtnCanopy.x metres, a cell's tree kept with the
-// probability that makes the crowns cover what the cover says, round-topped or pointed, of the height the
-// canopy atlas gives. They are marched and cast shadows; where a crown is well under a pixel it is its mean
+// The trees are geometry (R7): the voxel rings' own trees (santa-fe-reference S27e). trees.hpp collectTrees
+// puts one candidate on each cell of a 9.9 m grid, from a hash of the cell; this hashes the cells the same
+// way, so each crown stands where that tree stands, of its species, size and height, kept by the same test
+// (the cover, its clumps and its crown's reach: farColour's alpha is the cover times the clumps, from the
+// same 100 m footprint). Each species' crown is its shape's, measured from the shape library: how wide for
+// its height, and how high its top stands at each distance from the trunk. They are marched and cast shadows; where a crown is well under a pixel it is its mean
 // height instead (the accumulation averages the rest). The ground between them is in patches (R8).
 //
 // mtnLodBase + mtnLodSlope * t: how much ground a pixel covers t along the ray being marched (set by the
@@ -85,6 +88,7 @@ bool mtnFarQuad(int f, vec4 R, ivec2 i0, out ivec2 a, out ivec2 b, out ivec2 c, 
 
 // ---- Feature switches (main.cpp's panel; also read by trace.frag) ----
 uniform vec4 sfFlags;     // x: the bits below
+uniform vec4 mtnTrees;    // x: the landform's seed (trees.hpp collectTrees' grid)
 uniform vec4 mtnCanopy;   // x: tree cell (m), y: crown size scale, z: far detail strength, w: ground patches strength
 uniform vec4 sfQuality;   // x: smoothing radius (voxels, 1 or 2), y: cloud light steps, z: far shadow reach (m),
                           // w: far detail octaves (share of the full count)
@@ -125,6 +129,8 @@ bool sfOn(uint bit) { return (uint(sfFlags.x + 0.5) & bit) != 0u; }
 #define SF2_AO            128u  // a short traced AO ray per 2 x 2 texels (ao_trace.frag), times a screen-space AO (shadow_soft)
 #define SF2_GLINTS        512u  // sun glints on snow and rock (trace.frag)
 #define SF2_FAR_SHADOW_LOW 256u // the far field's share of the sun's shadow at the clouds' resolution (clouds.frag; with the shadow blur)
+#define SF2_FAR_AO        1024u // the far field's horizon AO on the heightfield (trace.frag sfFarAO)
+#define SF2_SKY_LIGHT     2048u // the sky light from the whole sky, clouds and plains, by the normal (sky_ambient.frag); off: one direction
 bool sfOn2(uint bit) { return (uint(sfFlags.y + 0.5) & bit) != 0u; }
 uniform vec4 sfBevel;     // x: bevel width (share of a voxel's edge), y: its strength, z: "smooth more"'s amount
 
@@ -141,10 +147,62 @@ SF_GLOBAL vec3 mtnFarHitNormal = vec3(0.0, 1.0, 0.0);   // blocky distance: the 
 SF_GLOBAL vec2 mtnFarHitBlock = vec2(0.0, 0.0);        // ... and its block's centre
 SF_GLOBAL float mtnFarHitSize = 0.0;                   // ... and its block's size (the reconstruction's voxel edge)   // how much of the last mtnFarSurface was crown
 
+// ---- The trees (santa-fe-reference S27e) ----
+// Species: 0 none, 1 juniper, 2 pinyon, 3 ponderosa, 4 fir, 5 spruce, 6 aspen (columns.hpp farSpecies).
+#define MTN_TREE_SCALE 1.65   // trees.hpp kTreeScale
+#define MTN_TREE_REACH 13.2   // trees.hpp kTreeReach
+// x: height before a tree's size (m, before MTN_TREE_SCALE; trees.hpp collectTrees), y: its reach / height
+// (growTree's, what collectTrees keeps a tree by), z: its shape's crown radius / height (the shape library,
+// 99th percentile), w: the chance it is a snag (no crown).
+vec4 mtnSpecies(int sp) {
+    if (sp == 1) return vec4(3.6, 0.527, 0.57, 0.035);
+    if (sp == 2) return vec4(5.2, 0.422, 0.48, 0.035);
+    if (sp == 3) return vec4(19.0, 0.219, 0.28, 0.04);
+    if (sp == 4) return vec4(17.0, 0.193, 0.20, 0.0);
+    if (sp == 5) return vec4(20.0, 0.161, 0.19, 0.0);
+    if (sp == 6) return vec4(12.0, 0.203, 0.24, 0.0);   // aspen: its sparse crown hides ~a third of its disc (0.32 x 0.75)
+    return vec4(0.0, 0.0, 0.0, 0.0);
+}
+// The crown's top at a share d of its radius out from the trunk, as a share of its height: a - b d^p, fitted
+// to the shapes' (azimuth-averaged) tops: cones for fir and spruce, ponderosa round-shouldered, the
+// woodland's domes flat.
+vec3 mtnSpeciesTop(int sp) {
+    if (sp == 1) return vec3(0.80, 0.17, 2.5);
+    if (sp == 2) return vec3(0.89, 0.31, 2.2);
+    if (sp == 3) return vec3(0.95, 0.52, 1.6);
+    if (sp == 4) return vec3(0.95, 0.75, 1.15);
+    if (sp == 5) return vec3(0.93, 0.78, 1.1);
+    return vec3(0.91, 0.06, 1.0);
+}
+// The code's mean tree height (m): the two species by their shares, at the mean size (0.97).
+float mtnSpeciesMeanHeight(float code) {
+    float a = mod(code, 8.0), b = mod(floor(code / 8.0), 8.0), mixB = floor(code / 64.0) / 3.0;
+    return mix(mtnSpecies(int(a)).x, mtnSpecies(int(b)).x, mixB) * MTN_TREE_SCALE * 0.97;
+}
+// A cone or round crown, by the lead species (the mean height's shape where crowns are under a pixel).
+bool mtnSpeciesPointed(float code) {
+    float a = mod(code, 8.0), b = mod(floor(code / 8.0), 8.0), mixB = floor(code / 64.0) / 3.0;
+    float lead = mixB > 0.5 ? b : a;
+    return lead >= 3.0 && lead <= 5.0;
+}
+// trees.hpp's hashes (landform.hpp hash32, hash2, unit), bit for bit.
+uint mtnHash32(uint x) {
+    x ^= x >> 16u; x *= 0x7feb352du;
+    x ^= x >> 15u; x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+float mtnUnit(uint h, int k) { return float(mtnHash32(h + uint(k) * 0x9e3779b9u) >> 8u) * (1.0 / 16777216.0); }
+// The crown's radius (m) for trees of height treeH: a mean over the species, for the fade.
+float mtnCrownRadius(float treeH, float code) {
+    float a = mod(code, 8.0), b = mod(floor(code / 8.0), 8.0), mixB = floor(code / 64.0) / 3.0;
+    return treeH * mix(mtnSpecies(int(a)).z, mtnSpecies(int(b)).z, mixB) * mtnCanopy.y;
+}
+
 // Ring f at xz: the ground's height and the cover (bilinear), the trees' height and whether they are
 // conifers (the nearest texel's), if it holds all four texels round it.
-bool mtnFarSampleIn(int f, vec2 xz, out float h, out float cover, out float treeH, out bool conifer) {
-    h = 0.0; cover = 0.0; treeH = 0.0; conifer = false;
+bool mtnFarSampleIn(int f, vec2 xz, out float h, out float cover, out float treeH, out float conifer) {
+    h = 0.0; cover = 0.0; treeH = 0.0; conifer = 0.0;
     vec4 R = mtnFarRing(f);
     if (R.w < 0.5) return false;
     float texel = R.z / float(MTN_FAR_RES);
@@ -158,15 +216,14 @@ bool mtnFarSampleIn(int f, vec2 xz, out float h, out float cover, out float tree
     cover = mix(mix(texelFetch(farColour, a, 0).a, texelFetch(farColour, b, 0).a, t.x),
                 mix(texelFetch(farColour, c, 0).a, texelFetch(farColour, d, 0).a, t.x), t.y);
     ivec2 n = t.y < 0.5 ? (t.x < 0.5 ? a : b) : (t.x < 0.5 ? c : d);
-    float code = floor(texelFetch(farCanopy, n, 0).a * 255.0 + 0.5);
-    conifer = code >= 128.0;
-    treeH = mod(code, 128.0) * 0.35;
+    conifer = floor(texelFetch(farCanopy, n, 0).a * 255.0 + 0.5);   // the species code (MTN_SP_*)
+    treeH = mtnSpeciesMeanHeight(conifer);
     return true;
 }
 
 bool mtnFarHeightIn(int f, vec2 xz, out float h) {
     float cover, treeH;
-    bool conifer;
+    float conifer;
     return mtnFarSampleIn(f, xz, h, cover, treeH, conifer);
 }
 
@@ -177,9 +234,9 @@ int mtnFarFirstRing(vec2 xz) {
     return reach <= 1.0 ? 0 : int(clamp(ceil(log2(reach)), 0.0, float(MTN_FAR_RINGS - 1)));
 }
 
-bool mtnFarSample(vec2 xz, out float h, out float cover, out float treeH, out bool conifer, out int ring) {
+bool mtnFarSample(vec2 xz, out float h, out float cover, out float treeH, out float conifer, out int ring) {
     ring = -1;
-    h = 0.0; cover = 0.0; treeH = 0.0; conifer = false;
+    h = 0.0; cover = 0.0; treeH = 0.0; conifer = 0.0;
     for (int f = mtnFarFirstRing(xz); f < MTN_FAR_RINGS; f++) {
         if (mtnFarSampleIn(f, xz, h, cover, treeH, conifer)) { ring = f; return true; }
     }
@@ -189,7 +246,7 @@ bool mtnFarSample(vec2 xz, out float h, out float cover, out float treeH, out bo
 // The finest far ring's ground height at xz; `ring` gets which. False beyond them all.
 bool mtnFarHeight(vec2 xz, out float h, out int ring) {
     float cover, treeH;
-    bool conifer;
+    float conifer;
     return mtnFarSample(xz, h, cover, treeH, conifer, ring);
 }
 
@@ -236,51 +293,56 @@ vec3 sfHash32(vec2 p) {
     return fract((q.xxy + q.yzz) * q.zyx);
 }
 
-// About the near trees' crowns (trees.hpp): round ones ~0.45 of their height across, at most most of a cell.
-float mtnCrownRadius(float treeH) { return clamp(treeH * 0.45, 1.6, mtnCanopy.x * 0.8) * mtnCanopy.y; }
-
-// How high the canopy stands over the ground at xz (m), given the cover and the trees' height there; how
-// much of xz is crown (`inCrown`, 0..1) and how far up its crown (`crownT`, 0 rim .. 1 top). Without the
-// trees as geometry: the cover raises the ground by its mean, as 55 did.
-float mtnCanopyAt(vec2 xz, float cover, float treeH, bool conifer, float footprint, out float inCrown, out float crownT) {
+// How high the canopy stands over the ground at xz (m), given the cover (with its clumps) and the species
+// code there; how much of xz is crown (`inCrown`, 0..1) and how far up its crown (`crownT`, 0 rim .. 1 top).
+// Without the trees as geometry: the cover raises the ground by its mean, as 55 did.
+float mtnCanopyAt(vec2 xz, float cover, float treeH, float code, float footprint, out float inCrown, out float crownT) {
     inCrown = 0.0;
     crownT = 0.0;
     if (cover < 0.004 || treeH < 0.5) return 0.0;
+    bool pointed = mtnSpeciesPointed(code);
     if (!sfOn(SF_FAR_TREES)) { inCrown = min(cover * 1.7, 1.0); crownT = 0.6; return cover * treeH * 0.7; }
     float C = mtnCanopy.x;
-    float r0 = mtnCrownRadius(treeH);
-    float keep = clamp(cover * C * C / (3.14159 * r0 * r0 * 0.9), 0.0, 1.0);
-    float meanH = min(cover, 0.95) * treeH * (conifer ? 0.4 : 0.6);
+    float r0 = mtnCrownRadius(treeH, code);
+    float meanH = min(cover, 0.95) * treeH * (pointed ? 0.4 : 0.6);
     float fade = smoothstep(0.2, 0.6, r0 / max(footprint, 1e-3));
     if (fade <= 0.0) { inCrown = min(cover, 1.0); crownT = 0.5; return meanH; }
-    // The 2 x 2 cells nearest xz (the quadrant of its cell it is in): a crown reaches at most 0.8 of a cell
-    // from a centre jittered over the middle 0.8, so farther cells almost never reach it -- 4 crowns
-    // tested, not 9.
+    float spA = mod(code, 8.0), spB = mod(floor(code / 8.0), 8.0), mixB = floor(code / 64.0) / 3.0;
+    uint key = uint(mtnTrees.x) * 0x2545F491u + 17u;
+    // The cells whose tree could reach xz: a trunk anywhere in its cell, a crown at most 0.57 of a 23 m
+    // juniper's... in practice under a cell: the 2 x 2 nearest (the quadrant xz is in), as before.
     vec2 g = xz / C;
     vec2 cell = floor(g - 0.5);
     float best = 0.0;
     float bestT = 0.0;
     for (int dy = 0; dy <= 1; dy++)
         for (int dx = 0; dx <= 1; dx++) {
-            vec2 c = cell + vec2(float(dx), float(dy));
-            vec3 hsh = sfHash32(c + vec2(0.37, 91.1));
-            if (hsh.z > keep) continue;
-            vec2 pos = (c + 0.1 + 0.8 * hsh.xy) * C;
-            float size = 0.55 + 0.9 * fract(hsh.x * 7.31 + hsh.y * 3.17);   // many small, some big
-            float r = r0 * sqrt(size);
+            ivec2 c = ivec2(cell) + ivec2(dx, dy);
+            uint h = mtnHash32(uint(c.x) * 0x8da6b343u ^ mtnHash32(uint(c.y) * 0xd8163841u ^ key));
+            float sp = mixB > mtnUnit(h, 3) ? spB : spA;
+            vec4 S = mtnSpecies(int(sp));
+            if (S.x <= 0.0 || mtnUnit(h, 5) < S.w) continue;
+            float u4 = mtnUnit(h, 4);
+            float size = 0.6 + 0.8 * u4 * u4 + 0.2 * mtnUnit(h, 7);
+            float th = S.x * size * MTN_TREE_SCALE;
+            float reach = min(S.y * th, MTN_TREE_REACH);
+            if (mtnUnit(h, 9) >= cover * C * C / max(3.14159 * reach * reach * 0.7, 0.5)) continue;
+            vec2 pos = (vec2(c) + vec2(mtnUnit(h, 1), mtnUnit(h, 2))) * C;
+            float r = S.z * th * mtnCanopy.y;
             vec2 rel = xz - pos;
             float d2 = dot(rel, rel) / (r * r);
             if (d2 >= 1.0) continue;
             float d = sqrt(d2);
-            float th = treeH * (0.55 + 0.45 * size);
             // Ragged rims: the crown's edge wanders with the angle round it.
             float ang = atan2(rel.y, rel.x);
-            float rag = 0.85 + 0.15 * sin(ang * 5.0 + hsh.y * 20.0) * sin(ang * 3.0 + hsh.x * 11.0);
+            float hx = mtnUnit(h, 11), hy = mtnUnit(h, 12);
+            float rag = 0.85 + 0.15 * sin(ang * 5.0 + hy * 20.0) * sin(ang * 3.0 + hx * 11.0);
             float dd = clamp(d / rag, 0.0, 1.0);
-            float prof = conifer ? pow(1.0 - dd, 0.85) : sqrt(max(1.0 - dd * dd, 0.0)) * (1.0 - 0.15 * dd);
-            float hh = th * mix(0.25, 1.0, prof);
-            if (dd >= 1.0) hh = 0.0;
-            if (hh > best) { best = hh; bestT = prof; }
+            if (dd >= 1.0) continue;
+            vec3 T = mtnSpeciesTop(int(sp));
+            float prof = T.x - T.y * pow(dd, T.z);
+            float hh = th * prof;
+            if (hh > best) { best = hh; bestT = 1.0 - dd; }
         }
     float inside = best > 0.0 ? 1.0 : 0.0;
     inCrown = mix(min(cover, 1.0), inside, fade);
@@ -291,7 +353,7 @@ float mtnCanopyAt(vec2 xz, float cover, float treeH, bool conifer, float footpri
 // The ground plus the canopy at xz: the surface the far march meets.
 bool mtnFarTotal(vec2 xz, float footprint, out float h, out int ring, out float treeH) {
     float cover;
-    bool conifer;
+    float conifer;
     if (!mtnFarSample(xz, h, cover, treeH, conifer, ring)) return false;
     float inC, ct;
     h += mtnCanopyAt(xz, cover, treeH, conifer, footprint, inC, ct);
@@ -385,7 +447,7 @@ void mtnFarSurface(int f, vec2 xz, float pixel, out vec3 normal, out vec3 albedo
         // A block: the face the march hit, one colour -- its ground and its trees by their cover, a little
         // darker on the sides, with a faint per-block tone.
         float h, cover, treeH;
-        bool conifer;
+        float conifer;
         mtnFarSampleIn(f, mtnFarHitBlock, h, cover, treeH, conifer);
         vec3 ground = pjvSrgbToLinear(mtnFarColour(f, mtnFarHitBlock));
         vec3 crown = pjvSrgbToLinear(mtnFarCanopyColour(f, mtnFarHitBlock));
@@ -406,7 +468,7 @@ void mtnFarSurface(int f, vec2 xz, float pixel, out vec3 normal, out vec3 albedo
         tone *= mtnCanopy.z;
     }
     float h, cover, treeH;
-    bool conifer;
+    float conifer;
     mtnFarSampleIn(f, xz, h, cover, treeH, conifer);
     vec3 ground = pjvSrgbToLinear(mtnFarColour(f, xz));
     // Patches of bare earth and of grass, tens of metres across, down to a few pixels.
@@ -424,7 +486,7 @@ void mtnFarSurface(int f, vec2 xz, float pixel, out vec3 normal, out vec3 albedo
     float c0 = mtnCanopyAt(xz, cover, treeH, conifer, pixel, inC, ct);
     vec3 n = nG;
     if (c0 > 0.0 && sfOn(SF_FAR_TREES)) {
-        float e = max(0.2, mtnCrownRadius(treeH) * 0.12);
+        float e = max(0.2, mtnCrownRadius(treeH, conifer) * 0.12);
         float i1, i2, t1, t2;
         float cx = mtnCanopyAt(xz + vec2(e, 0.0), cover, treeH, conifer, pixel, i1, t1);
         float cz = mtnCanopyAt(xz + vec2(0.0, e), cover, treeH, conifer, pixel, i2, t2);
@@ -463,24 +525,27 @@ float mtnLeaveVoxels(vec3 o, vec3 d) {
 // dark wall.
 float mtnBlockHeight(int f, vec2 centre, float B, out bool held) {
     float h, cover, treeH;
-    bool conifer;
+    float conifer;
     held = mtnFarSampleIn(f, centre, h, cover, treeH, conifer);
     float lowest = h;
     for (int c = 0; c < 4; c++) {
         vec2 o = vec2(c == 0 || c == 2 ? -0.4 : 0.4, c < 2 ? -0.4 : 0.4) * B;
         float hc, cc, tc;
-        bool cf;
+        float cf;
         if (mtnFarSampleIn(f, centre + o, hc, cc, tc, cf)) lowest = min(lowest, hc);
     }
     return lowest + min(cover, 1.0) * treeH * 0.2;   // the trees a little
 }
 
-// The highest ring f's column col stands (ground and trees), or 1e9 if it does not hold it.
+// The highest ring f's column col stands (ground and trees), or 1e9 if it does not hold it: the state's alpha, in
+// steps of MTN_FAR_MAX_STEP rounded up (main.cpp kFarMaxStep; S26: it was a texture of its own, and the trace
+// pass needed the sampler).
+#define MTN_FAR_MAX_STEP 20.0
 float mtnFarColumnMax(int f, ivec2 col) {
     ivec2 tile;
     if (!mtnFarColumn(f, mtnFarRing(f), col, tile)) return 1e9;
     ivec2 slot = ivec2(mod(vec2(col), float(MTN_FAR_SPAN)));
-    return texelFetch(farMax, ivec2(f * MTN_FAR_SPAN + slot.x, slot.y), 0).x;
+    return floor(texelFetch(farState, ivec2(f * MTN_FAR_SPAN + slot.x, slot.y), 0).a * 255.0 + 0.5) * MTN_FAR_MAX_STEP;
 }
 
 bool mtnFarBlockyMarch(vec3 o, vec3 d, float t0, float tMax, out float tHit, out int ring) {
@@ -588,7 +653,7 @@ bool mtnFarMarch(vec3 o, vec3 d, float t0, float tMax, bool shadow, out float tH
         if (p.y > MTN_FAR_TOP && d.y >= 0.0) return false;
         float fp = mtnLodBase + mtnLodSlope * t;
         float h, treeH, cover;
-        bool conifer;
+        float conifer;
         int f;
         if (!mtnFarSample(p.xz, h, cover, treeH, conifer, f)) return false;
         // The crowns only where the ray could meet them: well above the tallest, the ground is enough.
@@ -618,8 +683,8 @@ bool mtnFarMarch(vec3 o, vec3 d, float t0, float tMax, bool shadow, out float tH
         // Among the crowns: steps shorter than a crown, or the ray slips between them.
         // Among the crowns: steps shorter than a crown, or the ray slips between them -- only where crowns
         // are drawn as crowns (well under a pixel they are their mean height, a smooth surface).
-        if (sfOn(SF_FAR_TREES) && treeH > 0.5 && above < treeH * 1.3) {
-            float r0 = mtnCrownRadius(treeH);
+        if (sfOn(SF_FAR_TREES) && treeH > 0.5 && above < treeH * 1.7) {   // a tree up to 1.6x the mean size (S27e)
+            float r0 = mtnCrownRadius(treeH, conifer);
             if (r0 > 0.2 * fp) step = min(step, max(r0 * 0.6, max(fp * 0.5, 0.25)));
         }
         prevT = t;

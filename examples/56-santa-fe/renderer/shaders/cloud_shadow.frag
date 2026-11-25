@@ -24,7 +24,6 @@ SAMPLER2D(farHeight, 2);
 SAMPLER2D(farColour, 3);
 SAMPLER2D(farState, 4);
 SAMPLER2D(farCanopy, 5);
-SAMPLER2D(farMax, 6);
 uniform vec4 sfCloudMapPrev;     // xy: last frame's corner, z: the frame (which sixteenth refreshes), w: 1 all of it
 
 #define PI 3.14159265358979

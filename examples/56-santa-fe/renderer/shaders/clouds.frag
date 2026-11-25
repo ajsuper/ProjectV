@@ -2,18 +2,13 @@ $input v_color0
 $input v_texcoord0
 
 // =============================================================================
-// clouds.frag -- the cumulus, at a quarter of the trace pass's texels, accumulated over frames
-// (santa-fe-reference S11: the clouds were the costliest part of a sky view, marched again by every texel
-// every frame with few long steps, and grainy at their edges).
+// clouds.frag -- the cumulus, at a quarter of the trace pass's texels (santa-fe-reference S11, S24).
 //
 // Each texel marches its view ray through the layer (santa_fe_clouds.sc) to the farthest surface the trace
-// pass saw in its footprint, the steps offset per frame, and puts the air in front of the cloud on it. Then it
-// blends with its own history, read where the cloud was last frame (reprojected at the cloud's own distance:
-// clouds are far, so a turning camera moves them by its turn), unless the surface behind changed depth (a
-// mountain's edge moving across it), or a setting changed. A still view converges to many steps a texel; a
-// moving one keeps most of them.
+// pass saw in its footprint, the steps offset by a dither turned each frame, and puts the air in front of the
+// cloud on it. cloud_temporal.frag accumulates it (S24c; it had a history of its own here before, unclipped).
 //
-// Inputs: the trace pass (colour 0, gPos 1, ...), this pass's own last output (clouds 7, cloudDepth 8).
+// Inputs: the trace pass's gPos 0 and gNormal 1 (fbo 17), the far field's textures (2-6), the sky's light 7.
 // Outputs: 0 rgb the clouds' light (with the air in front of them), a what they let through; 1 x the
 // clouds' front distance, y the farthest surface it marched to, z (blocky) the size of the box it met first.
 // =============================================================================
@@ -29,16 +24,14 @@ uniform vec4 sfTemporal;     // x: reset
 uniform vec4 jitterParams;
 uniform vec4 sfShadowLOD;    // x: the trace's shadow rays go through voxels this far (m); the far field's part starts there
 
-SAMPLER2D(gPos, 1);
-SAMPLER2D(gNormal, 2);
-SAMPLER2D(cloudNoise, 9);
-SAMPLER2D(farHeight, 10);
-SAMPLER2D(farColour, 11);
-SAMPLER2D(farState, 12);
-SAMPLER2D(farCanopy, 13);
-SAMPLER2D(farMax, 14);
-SAMPLER2D(cloudHist, 7);
-SAMPLER2D(cloudHistDepth, 8);
+SAMPLER2D(gPos, 0);      // fbo 17: the trace pass's gPos and gNormal alone (S23: a slot for the sky's light)
+SAMPLER2D(gNormal, 1);
+SAMPLER2D(cloudNoise, 2);
+SAMPLER2D(farHeight, 3);
+SAMPLER2D(farColour, 4);
+SAMPLER2D(farState, 5);
+SAMPLER2D(farCanopy, 6);
+#define SF_SKY_TEX_SLOT 7   // sky_ambient.frag (S23)
 
 #define PI 3.14159265358979
 #include <mountains_sky.sc>
@@ -83,7 +76,7 @@ float farSunShadow(ivec2 t0, vec2 ratio, ivec2 tsize) {
 void main() {
     vec2 res = passTargetRes.xy;
     ivec2 at = ivec2(gl_FragCoord.xy);
-    vec2 uv = v_texcoord0 + jitterParams.xy * passTargetRes.zw;
+    vec2 uv = v_texcoord0;   // not jittered: nothing averages the frames here now (S24)
     vec3 camO = pjvViewPosition();
     vec3 dir = pjvViewRayDirection(uv, res);
 
@@ -100,9 +93,10 @@ void main() {
         }
 
     vec3 skyUp = mtnSkyFrom(camO, vec3(0.0, 1.0, 0.0));
-    vec3 groundUp = MTN_GROUND_ALBEDO * SUN_COLOR * max(SUN_DIR.y, 0.0) * 0.3183;
-    // Interleaved gradient noise, turned by the frame: the steps' offsets cover the step over a few frames.
-    float jitter = fract(52.9829189 * fract(dot(vec2(at) + float(int(frameCount.x) % 64) * vec2(5.588238, 5.588238), vec2(0.06711056, 0.00583715))));
+    vec3 groundUp = mtnGroundUp();   // in the clouds' shadow (S23b)
+    // Interleaved gradient noise, turned each frame by the golden ratio (S24c): neighbouring texels and successive
+    // frames start their steps at different offsets; cloud_temporal.frag averages them.
+    float jitter = fract(52.9829189 * fract(dot(vec2(at), vec2(0.06711056, 0.00583715))) + float(int(frameCount.x) % 1024) * 0.61803399);
     float tCloud;
     vec4 cl = sfCloudMarch(camO, dir, tMax, SUN_DIR, mtnSunAir.rgb, skyUp, groundUp, jitter, int(renderParams.y), tCloud);
     vec4 cur = vec4(0.0, 0.0, 0.0, 1.0);
@@ -114,30 +108,10 @@ void main() {
     float front = sfCloudFront;
     float frontBox = sfCloudFrontBox;
 
-    // The history, where this cloud was last frame.
+    // This frame's march; cloud_temporal.frag accumulates it (S24c).
     vec4 outC = cur;
     float outFront = front;
     float outBox = frontBox;
-    if (sfTemporal.x < 0.5) {
-        bool nowIn, thenIn;
-        // From the texel's centre, not its jittered sample: a still camera then reads its own texel exactly
-        // (reading it bilinearly at the jittered point blurred the clouds a little more every frame).
-        vec3 dirC = pjvViewRayDirection(v_texcoord0, res);
-        vec3 p = camO + dirC * (cl.a < 1.0 ? tCloud : 30000.0);
-        vec2 prevUV = pjvPrevViewUV(p, res, thenIn);
-        if (thenIn && all(greaterThanEqual(prevUV, vec2(0.0, 0.0))) && all(lessThanEqual(prevUV, vec2(1.0, 1.0)))) {
-            vec4 h = texture2D(cloudHist, prevUV);
-            vec4 hd = texture2D(cloudHistDepth, prevUV);
-            // The surface behind it moved a long way in depth: what the history holds is another ray's.
-            float a = max(hd.y, 1.0), b = max(tMax, 1.0);
-            bool same = abs(log(min(a, 1e9) / min(b, 1e9))) < 0.2;
-            if (same) {
-                outC = mix(h, cur, 0.12);
-                outBox = front <= hd.x ? frontBox : hd.z;
-                outFront = min(hd.x, front);
-            }
-        }
-    }
     gl_FragData[0] = outC;
     gl_FragData[1] = vec4(outFront, tMax, outBox, farSunShadow(t0, ratio, tsize));   // z: the front box's size (blocky; 0 smooth)
 }
