@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "mountains/landform.hpp"
+#include "mountains/props.hpp"
 #include "mountains/surface.hpp"
 #include "mountains/trees.hpp"
 #include "utils/material.h"
@@ -28,12 +29,6 @@ constexpr int kChunkRes = 64;
 inline double voxelSize(int ring) { return 0.25 * double(1u << ring); }
 inline double cellSize(int ring) { return voxelSize(ring) * kChunkRes; }
 
-// Palette slots for every material and shade, the same in every ring's component.
-struct Palette {
-    std::array<std::array<uint8_t, kShades>, kMaterialCount> slot{};
-    uint8_t at(Material m, int shade) const { return slot[size_t(m)][size_t(shade)]; }
-};
-
 struct ColumnChunk {
     int64_t iy = 0;   // cell, in the ring's cells (world y = iy * cellSize)
     projv::utils::TileTable tiles;
@@ -45,6 +40,7 @@ struct ColumnResult {
     std::vector<ColumnChunk> chunks;   // a voxel ring's
     std::vector<float> farHeights;     // a far ring's: 64 x 64 heights, x fastest
     std::vector<uint32_t> farColours;  // ... and colours, RGBA8 (sRGB), x fastest
+    std::vector<PropInstance> props;   // the props this column draws (rings 0-2)
     double sampleMs = 0, fillMs = 0;
 };
 
@@ -92,7 +88,8 @@ inline ColumnResult generateFarColumn(const Landform& land, int ring, int64_t ix
 // How many voxels below its lowest neighbour a column is filled.
 constexpr int kSkirt = 4;
 
-inline ColumnResult generateColumn(const Landform& land, const Palette& palette, int ring, int64_t ix, int64_t iz) {
+inline ColumnResult generateColumn(const Landform& land, const Palette& palette, const PropLibrary* library, int ring,
+                                   int64_t ix, int64_t iz) {
     using clock = std::chrono::steady_clock;
     ColumnResult out;
     out.ring = ring;
@@ -128,7 +125,28 @@ inline ColumnResult generateColumn(const Landform& land, const Palette& palette,
             out.height = mix(mix(at(i, j).height, at(i + 1, j).height, u), mix(at(i, j + 1).height, at(i + 1, j + 1).height, u), w);
             return true;
         };
-        collectTrees(x0, z0, x0 + c, z0 + c, land.settings().seed, v <= 1.0, v <= 0.5, groundAt, trees);
+        // Chamisa is a prop in ring 0 (props.hpp), stamped in ring 1 (0.5 m voxels) as before.
+        collectTrees(x0, z0, x0 + c, z0 + c, land.settings().seed, v <= 1.0, ring == 1, groundAt, trees);
+        // Props read the same 1 m grid, interpolated (height and slope): it is the same grid in rings 0-2, so
+        // they agree on every prop.
+        if (library && ring <= 2) {
+            auto propGround = [&](double x, double z, Sample& out) {
+                const double fi = (x - gx0) / g, fj = (z - gz0) / g;
+                const int i = int(std::floor(fi)), j = int(std::floor(fj));
+                if (i < 0 || j < 0 || i >= gn - 1 || j >= gn - 1) return false;
+                const double u = fi - i, w = fj - j;
+                auto at = [&](int a, int b) -> const Sample& { return coarse[size_t(b) * size_t(gn) + size_t(a)]; };
+                auto bil = [&](double Sample::*f) {
+                    return mix(mix(at(i, j).*f, at(i + 1, j).*f, u), mix(at(i, j + 1).*f, at(i + 1, j + 1).*f, u), w);
+                };
+                out = at(int(std::lround(fi)), int(std::lround(fj)));
+                out.height = bil(&Sample::height);
+                out.gx = bil(&Sample::gx);
+                out.gz = bil(&Sample::gz);
+                return true;
+            };
+            collectProps(land.settings().seed, *library, ring, x0, z0, c, propGround, trees, out.props);
+        }
     }
 
     // The top solid voxel of each column: a voxel is solid when its centre is under the ground.

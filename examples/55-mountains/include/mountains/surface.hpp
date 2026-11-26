@@ -6,6 +6,8 @@
 // a first dusting of snow on the peaks -- or November (MOUNTAINS_SEASON=november): bare aspens, more snow.
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 
@@ -18,6 +20,7 @@ enum class Material : uint8_t {
     Soil, RedSoil, Grama, Sediment, Sand, Tundra,
     // canopy
     Juniper, Pinyon, Ponderosa, Fir, Spruce, AspenGold, AspenBare, Oak, Chamisa, ChamisaBloom,
+    Cholla, Yucca, Snakeweed,
     // wood
     Bark, PonderosaBark, AspenTrunk, Deadwood,
     // rock, snow, water
@@ -25,7 +28,7 @@ enum class Material : uint8_t {
     Count
 };
 constexpr int kMaterialCount = int(Material::Count);
-constexpr int kShades = 8;   // per material: 26 x 8 = 208 palette slots of the 255
+constexpr int kShades = 8;   // per material: 29 x 8 = 232 palette slots of the 255
 
 inline bool november() {
     static const bool v = [] {
@@ -34,6 +37,12 @@ inline bool november() {
     }();
     return v;
 }
+
+// Palette slots for every material and shade, the same in every ring's component.
+struct Palette {
+    std::array<std::array<uint8_t, kShades>, kMaterialCount> slot{};
+    uint8_t at(Material m, int shade) const { return slot[size_t(m)][size_t(shade)]; }
+};
 
 struct Rgb { double r = 0, g = 0, b = 0; };
 inline Rgb operator*(Rgb a, double k) { return {a.r * k, a.g * k, a.b * k}; }
@@ -59,6 +68,9 @@ inline Rgb materialColour(Material m) {
         case Material::Oak: return {0.68, 0.33, 0.13};           // Gambel oak in October, rust
         case Material::Chamisa: return {0.55, 0.58, 0.46};       // rabbitbrush, grey-green
         case Material::ChamisaBloom: return {0.80, 0.70, 0.30};  // its faded yellow heads
+        case Material::Cholla: return {0.42, 0.50, 0.30};        // tree cholla's joints
+        case Material::Yucca: return {0.40, 0.49, 0.40};         // blue-green blades
+        case Material::Snakeweed: return {0.47, 0.48, 0.30};     // broom snakeweed, olive
         case Material::Bark: return {0.36, 0.27, 0.21};
         case Material::PonderosaBark: return {0.66, 0.38, 0.22}; // cinnamon plates
         case Material::AspenTrunk: return {0.88, 0.87, 0.80};

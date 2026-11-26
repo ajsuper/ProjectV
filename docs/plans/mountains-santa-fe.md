@@ -1,6 +1,6 @@
 # Mountains: the Sangre de Cristo at Santa Fe
 
-Status: **approved**, 2026-11-21. **M1-M3 built, M5 two passes, M7 built** (D2 revised: a smooth far field); M4 (the local scale) next. A new example, `examples/55-mountains` (target
+Status: **approved**, 2026-11-21. **M1-M3 built, M5 two passes, M7 built** (D2 revised: a smooth far field); M4 (the local scale) next: M4a, props off the grid, in progress. A new example, `examples/55-mountains` (target
 `mountains`), that generates mountains in the style of those around Santa Fe and draws them with a fast
 renderer of its own: voxels all the way to a horizon about 100 km out, detailed underfoot. It leaves
 `50-terrain-generator` (canyonlands, alpine) as it is.
@@ -302,6 +302,23 @@ screen-space normal smoothing (normal_smooth) stays for the outer voxel rings ne
   of its own ring, and rows and blobs stay bounded (rows track the live chunks: freed rows are reused).
 - Camera presets `plaza`, `atalaya`, `baldy`, `aerial` exist but are rough: the user is to place the
   showcase views (AGENTS.md: camera positions are asked for, not searched for).
+
+## M4a: the small scale -- props off the grid (2026-11-22)
+
+The user: work on bushes, boulders and rocks; not everything needs to be snapped to the world grid --
+use scale and rotation to make it feel real and full.
+
+| # | Decision | Why |
+|---|---|---|
+| D18 | **Props are loose chunks**, each with its own position, rotation and scale, sharing a small library of voxel shapes (refcounted blobs) built at startup | The engine marches loose chunks through a BVH next to the grids, with no shader change; one blob drawn thousands of times costs one blob of memory. A turned, tilted, resized copy of 8 boulders reads as 1,000 boulders |
+| D19 | **Prop voxels are finer than the ground** (about 3-12 cm against 25 cm): each shape has its own resolution (16, 32 or 64) and its scale sets the voxel | Small things need voxels small enough to have a shape; their lattice turned with the prop is the "not snapped" look |
+| D20 | **A prop belongs to the column its anchor is in**, and appears in rings 0..lod: ring k's column emits the props with lod >= k and hides them with its cells. Placement is a pure function of world position (a jittered grid per kind, exact landform samples at the anchor) | Streaming, lifetime and the hand-off between rings come from the clipmap as they are; ring 0 and ring 1 agree on every prop |
+| D21 | **Kinds** (Santa Fe, by the surface mix): boulders (granite and gneiss on the cores, basalt on mesa scarps, sandstone off the cores; rounded, faceted and slab), cobbles, chamisa (was stamped), snakeweed, tree cholla and yucca in the piedmont, fallen logs in the forest | The piedmont reads as scattered shrubs and stones between the junipers; the scarps as basalt blocks; the forest floor as deadfall |
+| D22 | **Rotation**: yaw at random; stones tilted up to ~25 degrees and sunk 15-35 % into the ground, more downhill; plants upright with a small lean; logs lie along the slope | A stone half buried and tilted looks like it has been there; a level-set stone looks dropped |
+
+Milestone **M4a**: the library, the placement, the props in the streaming; chamisa moved from the
+stamped trees to props; captures judged by the user; frame cost measured (the loose BVH is rebuilt on
+every flush).
 
 ## Open questions
 

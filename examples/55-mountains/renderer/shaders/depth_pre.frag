@@ -19,6 +19,7 @@ $input v_texcoord0
 // =============================================================================
 
 #include <bgfx_shader.sh>
+#define PJV_SCENE_GRIDS_FIRST   // props: many small loose chunks over grid terrain (pjv_scene.sc)
 #include <pjv_scene.sc>
 #include <pjv_camera.sc>
 

@@ -26,6 +26,7 @@ $input v_texcoord0
 
 #include <bgfx_shader.sh>
 
+#define PJV_SCENE_GRIDS_FIRST   // props: many small loose chunks over grid terrain (pjv_scene.sc)
 #include <pjv_scene.sc>
 
 #include <pjv_camera.sc>      // the engine camera: pjvView*, pjvPrevView*
@@ -101,6 +102,9 @@ void main() {
             rq.startLOD = 0;
             rq.finishLOD = i == 0 ? 2u : 0u;
             rq.distanceToFinishLOD = i == 0 ? 10000u : 30u;
+            // A shadow ray meets props (no taller than ~4 m) only near its start: past where it climbs over
+            // the tallest of them it walks the terrain alone.
+            if (i == 1) pjvQueryLooseReach(rq, min(4.0 / max(SUN_DIR.y, 0.08), 60.0));
             found = pjvRaySceneIntersect(current, rq).hit;
             // Trust the march's own hit data: re-intersecting foundBox misclassifies boundary-exact hits.
             voxelHit = !(found.foundBox.size < 0.0 || found.rayT <= 0.0 || dot(found.normal, found.normal) < 0.5);

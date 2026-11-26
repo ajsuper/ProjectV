@@ -91,8 +91,8 @@ struct Job {
 
 class Pool {
 public:
-    Pool(const Landform& land, const Palette& palette, unsigned threads, int firstFar)
-        : land_(land), palette_(palette), firstFar_(firstFar) {
+    Pool(const Landform& land, const Palette& palette, const PropLibrary* props, unsigned threads, int firstFar)
+        : land_(land), palette_(palette), props_(props), firstFar_(firstFar) {
         for (unsigned t = 0; t < threads; ++t) threads_.emplace_back([this] { run(); });
     }
     ~Pool() {
@@ -139,13 +139,14 @@ private:
             }
             if (job.cancelled && job.cancelled->load()) continue;
             ColumnResult r = job.ring >= firstFar_ ? generateFarColumn(land_, job.ring, job.ix, job.iz)
-                                                   : generateColumn(land_, palette_, job.ring, job.ix, job.iz);
+                                                   : generateColumn(land_, palette_, props_, job.ring, job.ix, job.iz);
             std::lock_guard<std::mutex> lock(mutex_);
             results_.push_back(std::move(r));
         }
     }
     const Landform& land_;
     const Palette& palette_;
+    const PropLibrary* props_ = nullptr;
     int firstFar_ = 1 << 30;
     std::vector<std::thread> threads_;
     std::mutex mutex_;
@@ -166,6 +167,7 @@ struct Column {
     bool done = false;
     std::shared_ptr<std::atomic<bool>> cancelled = std::make_shared<std::atomic<bool>>(false);
     std::vector<std::pair<int64_t, projv::ChunkHandle>> chunks;   // (iy, handle)
+    std::vector<projv::ChunkHandle> props;                         // loose chunks (props.hpp)
 };
 
 struct Ring {
@@ -202,6 +204,11 @@ struct Clipmap {
     int64_t radius = 8;   // cells from the centre to the edge (N / 64)
     std::vector<Ring> ring;
     FarField farField;
+    // Props (plan D18): the library's blob and resolution per shape, and the component they draw as.
+    std::vector<int32_t> propBlob;
+    std::vector<int> propRes;
+    projv::ComponentHandle propComponent = projv::INVALID_COMPONENT_HANDLE;
+    double culledAt[3] = {1e30, 1e30, 1e30};   // where the camera was when the props were last culled
 
     bool isFar(int k) const { return k >= voxelRings; }
     // The state texel and the atlas texel of a far ring's column.
@@ -271,6 +278,34 @@ void releaseChunk(projv::Scene& scene, projv::ChunkHandle h) {
     scene.slots.chunks.push_back(h);
 }
 
+// Frees a column's chunks and props, and its far tile's slot.
+void releaseColumn(Clipmap& cm, projv::Scene& scene, int k, Column& col) {
+    col.cancelled->store(true);
+    for (auto& [iy, h] : col.chunks) releaseChunk(scene, h);
+    for (projv::ChunkHandle h : col.props) releaseChunk(scene, h);
+    col.chunks.clear();
+    col.props.clear();
+    if (cm.isFar(k) && col.done) cm.setFarState(k, col.ix, col.iz, false);
+}
+
+// One prop as a loose chunk sharing its shape's blob.
+projv::ChunkHandle installProp(projv::Scene& scene, const Clipmap& cm, const PropInstance& p) {
+    const int res = cm.propRes[size_t(p.shape)];
+    projv::Chunk chunk;
+    chunk.header.position = vec3(float(p.px), float(p.py), float(p.pz));
+    chunk.header.rotation = projv::core::quat(float(p.qw), float(p.qx), float(p.qy), float(p.qz));
+    chunk.header.scale = float(p.size);
+    chunk.header.voxelScale = float(p.size / double(res));
+    chunk.header.resolution = uint32_t(res);
+    chunk.geometryPoolIndex = cm.propBlob[size_t(p.shape)];
+    scene.geometryPool[size_t(chunk.geometryPoolIndex)].refCount++;
+    chunk.componentHandle = cm.propComponent;
+    chunk.gridIndex = -1;
+    chunk.cellIndex = -1;
+    chunk.alive = true;
+    return projv::utils::allocateChunkSlot(scene, std::move(chunk));
+}
+
 projv::ChunkHandle installChunk(projv::Scene& scene, const Ring& r, int64_t ix, int64_t iz, ColumnChunk&& cc) {
     const double c = cellSize(r.k);
     projv::ChunkHeader hdr;
@@ -294,11 +329,7 @@ projv::ChunkHandle installChunk(projv::Scene& scene, const Ring& r, int64_t ix, 
 
 void dropRing(Clipmap& cm, projv::Scene& scene, int k) {
     Ring& r = cm.ring[size_t(k)];
-    for (auto& [key, col] : r.columns) {
-        col.cancelled->store(true);
-        for (auto& [iy, h] : col.chunks) releaseChunk(scene, h);
-        if (cm.isFar(k) && col.done) cm.setFarState(k, col.ix, col.iz, false);
-    }
+    for (auto& [key, col] : r.columns) releaseColumn(cm, scene, k, col);
     r.columns.clear();
     r.pending = 0;
     r.placed = false;
@@ -329,10 +360,8 @@ void placeRings(Clipmap& cm, projv::Scene& scene, Pool* pool, double camX, doubl
         for (auto it = r.columns.begin(); it != r.columns.end();) {
             Column& col = it->second;
             if (cm.inExtent(r, col.ix, col.iz)) { ++it; continue; }
-            col.cancelled->store(true);
             if (!col.done) --r.pending;
-            for (auto& [iy, h] : col.chunks) releaseChunk(scene, h);
-            if (cm.isFar(k) && col.done) cm.setFarState(k, col.ix, col.iz, false);
+            releaseColumn(cm, scene, k, col);
             it = r.columns.erase(it);
         }
     }
@@ -398,6 +427,36 @@ void rebuildGrid(Clipmap& cm, projv::Scene& scene, int k) {
     r.dirty = false;
 }
 
+// How far out a prop is drawn, in multiples of its chunk's edge: about 4 pixels tall at 1080p (a 30 cm
+// cobble to 60 m, a chamisa to 200 m). Every ray near the ground walks the props it passes, so the
+// ones too small to see are not worth their cost.
+constexpr double kPropReach = 200.0;
+// How far the camera moves before the props are culled again.
+constexpr double kPropRecull = 6.0;
+
+// The loose list: every prop of every column that shows (a hidden column's props hide with its cells)
+// that is near enough to be seen.
+void rebuildProps(Clipmap& cm, projv::Scene& scene, double camX, double camY, double camZ) {
+    static const double propReach = std::getenv("MOUNTAINS_PROP_REACH") ? std::atof(std::getenv("MOUNTAINS_PROP_REACH")) : kPropReach;
+    scene.looseChunks.clear();
+    for (int k = 0; k < cm.voxelRings; ++k) {
+        const Ring& r = cm.ring[size_t(k)];
+        for (const auto& [key, col] : r.columns) {
+            if (!col.done || col.props.empty() || cm.covered(k, col.ix, col.iz)) continue;
+            for (projv::ChunkHandle h : col.props) {
+                const projv::ChunkHeader& hd = scene.chunks[h].header;
+                const double dx = hd.position.x - camX, dy = hd.position.y - camY, dz = hd.position.z - camZ;
+                const double reach = propReach * hd.scale + kPropRecull;
+                if (dx * dx + dy * dy + dz * dz < reach * reach) scene.looseChunks.push_back(h);
+            }
+        }
+    }
+    scene.looseChunkCount = uint32_t(scene.looseChunks.size());
+    cm.culledAt[0] = camX;
+    cm.culledAt[1] = camY;
+    cm.culledAt[2] = camZ;
+}
+
 // Installs finished columns, within a budget. Returns how many it installed.
 int installResults(Clipmap& cm, projv::Scene& scene, Pool& pool, double budgetMs) {
     const auto start = Clock::now();
@@ -421,6 +480,8 @@ int installResults(Clipmap& cm, projv::Scene& scene, Pool& pool, double budgetMs
                 const int64_t iy = cc.iy;
                 col.chunks.emplace_back(iy, installChunk(scene, r, res.ix, res.iz, std::move(cc)));
             }
+            if (cm.propComponent != projv::INVALID_COMPONENT_HANDLE)
+                for (const PropInstance& p : res.props) col.props.push_back(installProp(scene, cm, p));
             col.done = true;
             --r.pending;
             r.dirty = true;
@@ -438,7 +499,7 @@ Palette internPalette(projv::Scene& scene, projv::ComponentRecord& comp) {
     Palette p;
     static const char* names[] = {"soil", "redsoil", "grama", "sediment", "sand", "tundra",
                                   "juniper", "pinyon", "ponderosa", "fir", "spruce", "aspengold", "aspenbare", "oak",
-                                  "chamisa", "chamisabloom", "bark", "ponderosabark", "aspentrunk", "deadwood",
+                                  "chamisa", "chamisabloom", "cholla", "yucca", "snakeweed", "bark", "ponderosabark", "aspentrunk", "deadwood",
                                   "granite", "gneiss", "lichen", "basalt", "snow", "water"};
     static_assert(sizeof(names) / sizeof(names[0]) == kMaterialCount, "a name for every material");
     for (int m = 0; m < kMaterialCount; ++m)
@@ -480,6 +541,7 @@ void placeCamera(Camera& cam, const Landform& land) {
 struct State {
     std::unique_ptr<Landform> land;
     Palette palette;
+    PropLibrary props;   // shapes only: their voxels are blobs in the scene
     Clipmap clipmap;
     std::unique_ptr<Pool> pool;
     Camera camera;
@@ -549,19 +611,53 @@ void setUpRings(State& st, projv::Scene& scene) {
     }
 }
 
+// The props' library (plan D18): every shape a blob of its own, held by the library (one reference) so
+// it stays when no prop shows it; and a component to draw them as, with the rings' palette.
+void setUpProps(State& st, projv::Scene& scene) {
+    if (std::getenv("MOUNTAINS_PROPS") && std::string(std::getenv("MOUNTAINS_PROPS")) == "0") return;
+    const auto t0 = Clock::now();
+    Clipmap& cm = st.clipmap;
+    projv::ComponentRecord rec;
+    rec.kind = projv::ComponentKind::Chunk;
+    rec.name = "props";
+    rec.sourcePath = "internal/mountains";
+    cm.propComponent = projv::utils::reserveComponentSlot(scene);
+    projv::utils::placeComponent(scene, cm.propComponent, std::move(rec));
+    const Palette p = internPalette(scene, scene.components[cm.propComponent]);
+    if (std::memcmp(&p, &st.palette, sizeof(Palette)) != 0)
+        projv::core::warn("[MOUNTAINS] the props interned their palette into different slots");
+    st.props = buildPropLibrary(uint32_t(envInt("MOUNTAINS_SEED", 1)), st.palette);
+    size_t bytes = 0;
+    for (size_t i = 0; i < st.props.shapes.size(); ++i) {
+        projv::GeometryBlob blob;
+        projv::utils::setBlobTiles(blob, std::move(st.props.tiles[i]));
+        blob.refCount = 1;
+        blob.dirty = true;
+        bytes += projv::utils::blobVoxelBytes(blob);
+        cm.propBlob.push_back(projv::poolInsertBlob(scene, std::move(blob)));
+        cm.propRes.push_back(st.props.shapes[i].res);
+    }
+    st.props.tiles.clear();
+    projv::core::info("[MOUNTAINS] {} prop shapes, {:.1f} MB, {:.0f} ms", st.props.shapes.size(), double(bytes) / 1048576.0,
+                      std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+}
+
 void report(State& st, projv::Scene& scene) {
     const Clipmap& cm = st.clipmap;
     size_t chunks = 0, bytes = 0;
+    size_t props = 0;
     for (const projv::Chunk& c : scene.chunks)
         if (c.alive) {
+            if (c.componentHandle == cm.propComponent) { ++props; continue; }   // shared blobs: not counted per prop
             ++chunks;
             if (c.geometryPoolIndex >= 0) bytes += projv::utils::blobVoxelBytes(scene.geometryPool[size_t(c.geometryPoolIndex)]);
         }
     std::string rings;
     for (const Ring& r : cm.ring) rings += " " + std::to_string(r.pending);
-    projv::core::info("[MOUNTAINS] {:.1f} ms/frame, camera ({:.0f}, {:.0f}, {:.0f}); pending by ring:{}; {} chunks, {:.0f} MB voxels",
+    projv::core::info("[MOUNTAINS] {:.1f} ms/frame, camera ({:.0f}, {:.0f}, {:.0f}); pending by ring:{}; {} chunks, {:.0f} MB voxels; "
+                      "{} props ({} shown)",
                       st.frames ? st.frameMs / st.frames : 0.0, st.camera.x, st.camera.y, st.camera.z, rings, chunks,
-                      double(bytes) / 1048576.0);
+                      double(bytes) / 1048576.0, props, scene.looseChunks.size());
 }
 
 // ---- The renderer (plan D11; renderer/, forked from the gallery's fast) ----------------------------
@@ -755,11 +851,12 @@ void startup(projv::Application& app) {
     settings.seed = uint32_t(envInt("MOUNTAINS_SEED", 1));
     st.land = std::make_unique<Landform>(settings);
     setUpRings(st, scene);
+    setUpProps(st, scene);
     placeCamera(st.camera, *st.land);
     st.cameraAbove = std::max(0.0, st.camera.y - st.land->height(st.camera.x, st.camera.z, 8.0));
     // MOUNTAINS_SUN="azimuth,elevation" in degrees (azimuth clockwise from north).
     if (const char* sun = std::getenv("MOUNTAINS_SUN")) std::sscanf(sun, "%f,%f", &st.sunAzimuth, &st.sunElevation);
-    st.pool = std::make_unique<Pool>(*st.land, st.palette, std::max(2u, std::thread::hardware_concurrency() - 2), st.clipmap.voxelRings);
+    st.pool = std::make_unique<Pool>(*st.land, st.palette, st.props.shapes.empty() ? nullptr : &st.props, std::max(2u, std::thread::hardware_concurrency() - 2), st.clipmap.voxelRings);
     placeRings(st.clipmap, scene, st.pool.get(), st.camera.x, st.camera.z, st.cameraAbove);
     projv::core::info("[MOUNTAINS] {} rings of {} cells, {} workers; the outer ring reaches {:.0f} km",
                       st.clipmap.rings, st.clipmap.span(), st.pool->threads(),
@@ -838,8 +935,15 @@ void stream(projv::Application& app) {
     }
     placeRings(st.clipmap, scene, st.pool.get(), st.camera.x, st.camera.z, st.cameraAbove);
     installResults(st.clipmap, scene, *st.pool, 6.0);
+    bool changed = false;
     for (int k = 0; k < st.clipmap.rings; ++k)
-        if (st.clipmap.ring[size_t(k)].dirty) rebuildGrid(st.clipmap, scene, k);
+        if (st.clipmap.ring[size_t(k)].dirty) {
+            rebuildGrid(st.clipmap, scene, k);
+            changed = true;
+        }
+    const double* at = st.clipmap.culledAt;
+    const double moved = std::hypot(st.camera.x - at[0], st.camera.y - at[1], st.camera.z - at[2]);
+    if (changed || moved > kPropRecull) rebuildProps(st.clipmap, scene, st.camera.x, st.camera.y, st.camera.z);
 
     projv::CameraView& view = app.world.ctx().get<projv::CameraView>();
     view.position = vec3(float(st.camera.x), float(st.camera.y), float(st.camera.z));
@@ -907,10 +1011,11 @@ int bench() {
     settings.seed = uint32_t(envInt("MOUNTAINS_SEED", 1));
     st.land = std::make_unique<Landform>(settings);
     setUpRings(st, scene);
+    setUpProps(st, scene);
     placeCamera(st.camera, *st.land);
     st.cameraAbove = std::max(0.0, st.camera.y - st.land->height(st.camera.x, st.camera.z, 8.0));
     const unsigned threads = std::max(2u, std::thread::hardware_concurrency());
-    st.pool = std::make_unique<Pool>(*st.land, st.palette, threads, st.clipmap.voxelRings);
+    st.pool = std::make_unique<Pool>(*st.land, st.palette, st.props.shapes.empty() ? nullptr : &st.props, threads, st.clipmap.voxelRings);
     const auto t0 = Clock::now();
     placeRings(st.clipmap, scene, st.pool.get(), st.camera.x, st.camera.z, st.cameraAbove);
     for (;;) {
@@ -939,6 +1044,27 @@ int bench() {
                     r.generated ? r.sampleMs / r.generated : 0.0, r.generated ? r.fillMs / r.generated : 0.0);
     }
     std::printf("total: %zu chunks, %.1f MB of voxels\n", totalChunks, double(totalBytes) / 1048576.0);
+    if (!st.props.shapes.empty()) {
+        static const char* kinds[] = {"boulder", "cobble", "chamisa", "snakeweed", "cholla", "yucca", "log"};
+        std::printf("props by ring (shown):");
+        for (const char* k : kinds) std::printf(" %9s", k);
+        std::printf("\n");
+        for (const Ring& r : st.clipmap.ring) {
+            if (r.k > 2) break;
+            int count[kPropKinds] = {};
+            for (auto& [key, col] : r.columns) {
+                if (st.clipmap.covered(r.k, col.ix, col.iz)) continue;
+                for (projv::ChunkHandle h : col.props) {
+                    const int32_t blob = scene.chunks[h].geometryPoolIndex;
+                    for (size_t i = 0; i < st.clipmap.propBlob.size(); ++i)
+                        if (st.clipmap.propBlob[i] == blob) { ++count[int(st.props.shapes[i].kind)]; break; }
+                }
+            }
+            std::printf("  ring %d             ", r.k);
+            for (int k = 0; k < kPropKinds; ++k) std::printf(" %9d", count[k]);
+            std::printf("\n");
+        }
+    }
     st.pool.reset();
     return 0;
 }
@@ -956,17 +1082,18 @@ int selftest() {
     settings.seed = uint32_t(envInt("MOUNTAINS_SEED", 1));
     st.land = std::make_unique<Landform>(settings);
     setUpRings(st, scene);
+    setUpProps(st, scene);
     st.camera.x = 0.0;
     st.camera.z = 0.0;
     st.camera.y = st.land->height(0.0, 0.0, 0.25) + 1.7;
     st.cameraAbove = 1.7;
-    st.pool = std::make_unique<Pool>(*st.land, st.palette, std::max(2u, std::thread::hardware_concurrency()), st.clipmap.voxelRings);
+    st.pool = std::make_unique<Pool>(*st.land, st.palette, st.props.shapes.empty() ? nullptr : &st.props, std::max(2u, std::thread::hardware_concurrency()), st.clipmap.voxelRings);
     int failures = 0;
     auto fail = [&](const std::string& what) {
         if (failures < 20) std::printf("FAIL: %s\n", what.c_str());
         ++failures;
     };
-    size_t firstRows = 0, firstBlobs = 0;
+    size_t firstRows = 0, firstBlobs = 0, peakChunks = 0;
     const auto t0 = Clock::now();
     // Out 5 km and back: back at the start, the same columns are held, so the same chunks and blobs must
     // be live as at the first step -- more would be a leak.
@@ -982,6 +1109,10 @@ int selftest() {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
         for (int k = 0; k < st.clipmap.rings; ++k) rebuildGrid(st.clipmap, scene, k);
+        rebuildProps(st.clipmap, scene, st.camera.x, st.camera.y, st.camera.z);
+        for (projv::ChunkHandle h : scene.looseChunks)
+            if (h >= scene.chunks.size() || !scene.chunks[h].alive || scene.chunks[h].geometryPoolIndex < 0)
+                fail("a prop on the loose list is not a live chunk with a shape");
         size_t liveChunks = 0, liveBlobs = 0;
         for (const projv::Chunk& c : scene.chunks) liveChunks += c.alive ? 1 : 0;
         for (const projv::GeometryBlob& b : scene.geometryPool) liveBlobs += b.refCount > 0 ? 1 : 0;
@@ -1010,7 +1141,8 @@ int selftest() {
             if (liveChunks != firstRows) fail("back at the start, " + std::to_string(liveChunks) + " chunks live, not " + std::to_string(firstRows));
             if (liveBlobs != firstBlobs) fail("back at the start, " + std::to_string(liveBlobs) + " blobs live, not " + std::to_string(firstBlobs));
         }
-        if (scene.chunks.size() > liveChunks * 2 + 64) fail("chunk rows " + std::to_string(scene.chunks.size()) + " for " + std::to_string(liveChunks) + " live: not reused");
+        peakChunks = std::max(peakChunks, liveChunks);   // props vary with the ground: rows track the peak
+        if (scene.chunks.size() > peakChunks + peakChunks / 4 + 64) fail("chunk rows " + std::to_string(scene.chunks.size()) + " for " + std::to_string(liveChunks) + " live: not reused");
         std::printf("step %2d  x %5.0f m  %zu chunks live, %zu rows, %zu blobs\n", step, st.camera.x, liveChunks,
                     scene.chunks.size(), liveBlobs);
     }
