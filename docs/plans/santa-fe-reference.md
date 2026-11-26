@@ -761,3 +761,106 @@ finest rings; more tufts, chamisa and snakeweed.
   Open: conservative beams need an any-child occupancy per coarse voxel (the rings' own voxels are thresholded at a fifth filled, so they can miss what a finer ring holds) -- a bit beside each, or a dilated march. And whether S27d can be done in the march (a ring's lookup per step) without the latency S26 found code in it
   costs; else in the bake (the ring holds the coarser tree where it would be under a texel from the rings' usual
   distance).
+
+- **S28** (2026-11-25): a realtime preset -- the user: a playable realtime version on this GPU; 60 fps at about
+  1080p, and it may give up voxel range, effects, internal resolution and use temporal reuse.
+
+  `SANTA_FE_WINDOW=WxH` sets the window (a bench now asks for exactly it, as a capture does: before, a tiling
+  window manager could have fitted it -- it had not: the old numbers were at 1600 x 900), and the bench prints the
+  window and the trace's size. `SANTA_FE_MODE=realtime` (and the panel's Realtime button) is the optimized preset
+  with the cuts below; `SANTA_FE_BENCH=preset` measures whichever mode starts, and `SANTA_FE_SCALE`,
+  `SANTA_FE_OFF` and `SANTA_FE_OFF2` apply in the bench too, to price a cut. `SANTA_FE_FRAMES=1` logs every
+  frame's wall and GPU time and prints percentiles and the frames over 16.7 / 33.3 ms at exit (with
+  `MOUNTAINS_FLY`, what streaming does to the frame).
+
+  At 1920 x 1080 the optimized preset is 17.2-17.8 ms (forest; trace 9.5-10), 15.5 (plaza). Priced there (two long
+  runs each, +-0.3 ms): render scale 0.42 -2.4 ms, 0.375 -4.1; leaf light -1.1; AO -1.15; and at 0.42 motes and god
+  rays -0.4, glints and the far AO -0.3, smooth ground and bevel -0.3, cloud detail and cloud shadows ~0. The far
+  crowns are not the far-trees switch's cost (their mean height instead of crowns was 1 ms slower); their cells
+  are now passed on position before their species and size are hashed.
+
+  | View, 1920 x 1080 | optimized | realtime (scale 0.4; no motes, god rays, glints, far AO) |
+  |---|---|---|
+  | forest | 17.2-17.8 ms | 13.7 (trace 7.1) |
+  | plaza | 15.5 | 12.4 (5.1) |
+  | raised over the forest (250 m) | -- | 16.0 (8.8) |
+  | aerial | -- | 14.5 (8.7) |
+  **Noisy in motion** (the user, watching a flight). Measured as a frame in motion against the same pose still
+  and converged (64 samples), below the horizon (`MOUNTAINS_FLY`, `MOUNTAINS_FLY_SECONDS`: a flight now starts
+  once every ring has generated -- the first measurements caught a half-loaded world, the coarse rings' trees
+  standing in for near ones not yet streamed; the capture logs its pose; `MOUNTAINS_CAPTURE_FRAMES=n` saves the n
+  frames after it, though bgfx's screenshots are not one a frame; `SANTA_FE_NO_JITTER` for measuring). Still, the
+  resolve builds the 0.4-scale trace up to the window over 64 jittered frames; moving, it kept 16 clamped into the
+  window's 3 x 3 -- about one trace texel at that scale -- so the history was held to this frame's jittered sample
+  and the detail the jitter built flickered away; and bilinear history blurred a little every frame. Now (resolve.frag):
+  the neighbourhood 3 x 3 a trace texel apart (`sfTemporal.w`), variance clipping in YCoCg (mean +- 1.25 sigma,
+  within the samples' range, clipped toward the centre, not per channel), the history by Catmull-Rom. At 5 m/s:
+  error 4.65 -> 4.17, pixels off by > 20 levels 2.8% -> 2.1%; streaming kept up (nothing pending in flight). The
+  still bench is unchanged (forest 13.7 ms, plaza 12.0).
+
+- **S29** (2026-11-26, in progress: S29a-c built, S29f first pass; S29d's limb darkening built, S29e open): sunset, and an atmosphere that is correct and complete -- the user, at
+  `MOUNTAINS_CAMERA=16.0,-2.3,760.6,-6.0877,-0.0787 MOUNTAINS_SUN=250.0,1.4`: a real issue, likely the cloud
+  shadows with the sun near the horizon.
+
+  What the sky (mountains_sky.sc) does now, against what a sunset needs:
+
+  | | Now | Missing |
+  |---|---|---|
+  | Shape | Flat exponential layers (air 8 km, haze 1.2 km); the horizon's rays 400-1000 km through them | A sphere: a level ray's airmass is ~38, not 125; the earth's shadow and the Belt of Venus opposite a low sun |
+  | Sunlight in the air | One colour for the whole ray (`mtnSunAir`, 6 km above the camera; CPU Kasten-Young airmass) | Each point's own sunlight (its path to the sun): a low sun's glow red at the horizon, yellow, then blue; the air beyond the terminator unlit |
+  | Ozone | In the sun's colour only | Its absorption along the sky's paths (Chappuis band: the twilight zenith stays blue) |
+  | Multiple scattering | A flat isotropic share | Hillaire 2020's multiple-scattering table (isotropic, but by height and sun angle) |
+  | Below the horizon | The sun's light 0: the sky black at once | Twilight: the upper air and the clouds still lit after the land is not |
+  | Clouds' sunlight | `mtnSunAir` for all of them | Their own height's: tops lit pink after the land is in shadow |
+
+  | # | Step | Why |
+  |---|---|---|
+  | S29a | **Cloud shadows drawn from the sun** (built) | Below |
+  | S29b | **Hillaire 2020's sky** (as Unreal's SkyAtmosphere): a spherical planet (6360 km ground, 6460 km top; ground at y 0, the camera's altitude its y), Rayleigh (5.802, 13.558, 33.1 e-6 /m, 8 km), Mie (3.996e-6 scattering, 4.4e-6 extinction /m, 1.2 km; Cornette-Shanks phase, g 0.8), ozone (0.650, 1.881, 0.085 e-6 /m absorption, a tent 10-40 km peaking at 25 km). Tables: transmittance (256 x 64, when the air changes), multiple scattering (32 x 32, likewise), sky view (192 x 108, every frame: the sky's light by direction), aerial perspective (32 x 32 x 32 froxels to ~32 km, every frame, as 2D slices). Santa Fe's haze settings and fog layers stay, on top | The model the field uses for exactly this: correct at every sun angle including below the horizon, cheap per pixel (lookups), and it replaces the CPU airmass |
+  | S29c | **The sun's light from the transmittance table** everywhere it is used: the land (by its altitude), the clouds (by each sample's), the haze shafts, the sky light cube | The land goes dark at its sunset while the clouds and the peaks still glow |
+  | S29d | **The sun's disc** with limb darkening and its colour from the table, and the earth's shadow on the clouds (their light march's sun below the horizon at their height) | The disc a hard white spot now |
+  | S29e | **A twilight check**: the sun at +5, +1.4, 0, -2, -6 degrees from the user's camera, captures and the sky's luminance against measured twilight (a civil twilight's zenith ~1-10 cd/m^2) | Calibrated, not by eye |
+
+  | S29f | **The night** (the user: a real night sky, stars and the moon): exposure that adapts to the light on the land; the moon, its phase from its angle to the sun, the key light once it outshines the twilight; stars, the Milky Way and airglow behind the air | A night that can be seen, lit by what lights it |
+
+  **S29a, cloud shadows drawn from the sun.** At 1.4 degrees a point of the land projects to the cloud base ~160 km
+  off along the sun, far off the 32 km map laid on the ground; it then took a 6-sample march, jittered, over the
+  first 12 km of a ~100 km path through the layer: blotches of shadow, and noise. The map is now drawn from the sun
+  (santa_fe_clouds.sc `sfSunBasis`, the same frame in main.cpp): a texel is a line toward the sun on the plane
+  square to it, its transmittance marched in 48 steps from where it rises through the base to where it leaves the
+  top, over the curved earth (`sfAltitude`: y plus the fall of the ground away from the camera, 0.2-1.8 km at
+  50-150 km). A point of the trace reads its line; past the map, the mean over the land round the camera
+  (sky_ambient's texel 6). At 22 degrees the shadows are as before; at 1.4 most of the land is in the clouds'
+  shadow, lit through their gaps toward the horizon.
+
+  **As built (S29b-f first pass, 2026-11-26).**
+  - *S29b*: santa_fe_atmosphere.sc (the model, the tables' mappings, the lookups) and atmosphere.frag (one RGBA32F
+    atlas, 1024 x 224, every frame: transmittance 256 x 64, multiple scattering 32 x 32, sky view 192 x 108, aerial
+    perspective 32 x 32 x 32 to 128 km; each region from last frame's others, settled in three frames,
+    `sfSunTop.w`). Bound as texture 54 to the trace (stage 8), clouds (8), sky_dirs (7), reflect (13);
+    mountains_sky.sc takes the sky, the air in front of things and the sun's light from it where a pass has it
+    (`SF_ATMO_SLOT`), the flat layers elsewhere. The haze is constant below SF_HAZE_FLOOR (1.7 km): extrapolated to
+    sea level a grazing path 400 km off had an optical depth of ~26. Reads are held to a region's texel centres (a
+    streak in the anti-sun direction was the next region bleeding in). The CPU sun (`throughAir`) marches the same
+    model. At 22 degrees the image is as before, the sky a little bluer.
+  - *S29c*: the land's sun, the leaves', the sheen's and the bounce's from the table at their own point
+    (`mtnSunAt`); the clouds' at each sample (`sfCloudSun`). At -2 degrees the land is dark and the clouds' sunward
+    sides and bases red.
+  - *S29d*: the sun's disc limb-darkened (Neckel and Labs), its colour from the table.
+  - *S29f*: `throughAir`, `twilightLux` (the light on the land by the sun's elevation, almanac values), the moon
+    (`moonAzimuth`, `moonElevation`, `SANTA_FE_MOON`; 0.27 lux full, Allen's phase law), `keyLight` (the moon is the
+    renderer's "sun" once the sun is past -4 and the moon lights the land more than the twilight), `adaptedExposure`
+    (the day's exposure x (land's light at 22 deg / now)^0.8, capped 3e5; `autoExposure`), and in the sky
+    (`sfNightSky`, `sfMoonDisc`): stars on a 160-a-face cube in the celestial frame (latitude 35.7), magnitudes 1-7.5,
+    a texel's Gaussian; the Milky Way; airglow by van Rhijn; a lit, phased moon with maria. Uniforms `sfMoon`,
+    `sfSunTrue`, `sfNight`.
+
+  Open (seen in the last captures, not yet fixed):
+  - Moonless (-20): near black, few stars -- the exposure cap (3e5) is too low for 0.0014 lux; 2e6 is the next try,
+    and the stars' brightness to judge by eye.
+  - -6: a jagged band along the horizon where the sky meets the far ridges (the aerial-perspective froxels against
+    the sky view, or the sky skip).
+  - A low moon through the haze: its forward scattering glows brown, as a low sun's would, but the cloud shadows in
+    it are blocky rectangles (the haze reads the moon-space cloud map's 125 m texels).
+  - The key light swaps from the sun to the moon at a step; no scotopic (night) desaturation yet; S29e's calibration
+    against measured twilight not done.

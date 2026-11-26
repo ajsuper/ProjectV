@@ -309,6 +309,10 @@ float mtnCanopyAt(vec2 xz, float cover, float treeH, float code, float footprint
     if (fade <= 0.0) { inCrown = min(cover, 1.0); crownT = 0.5; return meanH; }
     float spA = mod(code, 8.0), spB = mod(floor(code / 8.0), 8.0), mixB = floor(code / 64.0) / 3.0;
     uint key = uint(mtnTrees.x) * 0x2545F491u + 17u;
+    // The widest crown either species here can grow (size 1.6): a cell whose trunk is farther than that is
+    // passed on its position alone, before its species, size and keep are hashed (most of the four are).
+    vec4 SA = mtnSpecies(int(spA)), SB = mtnSpecies(int(spB));
+    float reachMax = max(SA.z * SA.x, SB.z * SB.x) * 1.6 * MTN_TREE_SCALE * mtnCanopy.y;
     // The cells whose tree could reach xz: a trunk anywhere in its cell, a crown at most 0.57 of a 23 m
     // juniper's... in practice under a cell: the 2 x 2 nearest (the quadrant xz is in), as before.
     vec2 g = xz / C;
@@ -319,17 +323,19 @@ float mtnCanopyAt(vec2 xz, float cover, float treeH, float code, float footprint
         for (int dx = 0; dx <= 1; dx++) {
             ivec2 c = ivec2(cell) + ivec2(dx, dy);
             uint h = mtnHash32(uint(c.x) * 0x8da6b343u ^ mtnHash32(uint(c.y) * 0xd8163841u ^ key));
-            float sp = mixB > mtnUnit(h, 3) ? spB : spA;
-            vec4 S = mtnSpecies(int(sp));
+            vec2 pos = (vec2(c) + vec2(mtnUnit(h, 1), mtnUnit(h, 2))) * C;
+            vec2 rel = xz - pos;
+            if (dot(rel, rel) >= reachMax * reachMax) continue;
+            bool isB = mixB > mtnUnit(h, 3);
+            float sp = isB ? spB : spA;
+            vec4 S = isB ? SB : SA;
             if (S.x <= 0.0 || mtnUnit(h, 5) < S.w) continue;
             float u4 = mtnUnit(h, 4);
             float size = 0.6 + 0.8 * u4 * u4 + 0.2 * mtnUnit(h, 7);
             float th = S.x * size * MTN_TREE_SCALE;
             float reach = min(S.y * th, MTN_TREE_REACH);
             if (mtnUnit(h, 9) >= cover * C * C / max(3.14159 * reach * reach * 0.7, 0.5)) continue;
-            vec2 pos = (vec2(c) + vec2(mtnUnit(h, 1), mtnUnit(h, 2))) * C;
             float r = S.z * th * mtnCanopy.y;
-            vec2 rel = xz - pos;
             float d2 = dot(rel, rel) / (r * r);
             if (d2 >= 1.0) continue;
             float d = sqrt(d2);

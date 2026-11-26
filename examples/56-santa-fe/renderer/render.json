@@ -1,6 +1,15 @@
 {
     "renderer": [
         {
+            "shaderID": 33,
+            "frameBufferInputIDs": [
+                30
+            ],
+            "resourceTexturesIDs": [],
+            "frameBufferOutputID": 30,
+            "multiPass": 0
+        },
+        {
             "shaderID": 9,
             "frameBufferInputIDs": [
                 8
@@ -37,7 +46,8 @@
                 18,
                 19,
                 24,
-                41
+                41,
+                54
             ],
             "frameBufferOutputID": 16,
             "multiPass": 0
@@ -62,7 +72,8 @@
                 1,
                 19,
                 24,
-                41
+                41,
+                54
             ],
             "frameBufferOutputID": 2,
             "multiPass": 0
@@ -78,7 +89,8 @@
                 1,
                 19,
                 24,
-                41
+                41,
+                54
             ],
             "frameBufferOutputID": 2,
             "multiPass": 0
@@ -133,7 +145,8 @@
                 17,
                 18,
                 19,
-                41
+                41,
+                54
             ],
             "frameBufferOutputID": 6,
             "multiPass": 0
@@ -156,7 +169,8 @@
                 29
             ],
             "resourceTexturesIDs": [
-                41
+                41,
+                54
             ],
             "frameBufferOutputID": 10,
             "multiPass": 0

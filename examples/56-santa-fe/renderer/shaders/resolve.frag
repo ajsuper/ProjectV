@@ -45,7 +45,7 @@ SAMPLER2D(aoF, 7);
 SAMPLER2D(history, 9);
 
 uniform vec4 frameCount;   // y: the camera moved (or the scene changed) this frame
-uniform vec4 sfTemporal;   // x: reset, y: frames kept when still, z: frames kept when moving
+uniform vec4 sfTemporal;   // x: reset, y: frames kept when still, z: frames kept when moving, w: a trace texel in pixels
 uniform vec4 sfUpscale;    // x colour, y sun, z reflections, w the sun's visibility: 2 temporal
 uniform vec4 sfUpscale2;   // x the traced AO (0 per face, 1 spatial, 2 temporal), y the shadow's A-Trous, z the AO's
 uniform vec4 sfSSAO;       // x radius (m), y strength, z most pixels across, w on
@@ -136,6 +136,41 @@ Parts partsAt(ivec2 q, float ao) {
     return p;
 }
 
+// ---- The history in motion (S28: an upscaler's history, not a 3 x 3 clamp at the window's resolution) ----
+vec3 sfToYCoCg(vec3 c) { return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b); }
+vec3 sfFromYCoCg(vec3 y) { return vec3(y.x + y.y - y.z, y.x + y.z, y.x - y.y - y.z); }
+
+// The history's colour at pix (pixel coordinates of texel centres - 0.5) by Catmull-Rom: bilinear blurred it a
+// little every frame the camera moved, and the blur built up.
+vec3 historyCatmullRom(vec2 pix, ivec2 last) {
+    ivec2 base = ivec2(floor(pix));
+    vec2 f = pix - vec2(base);
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec3 sum = vec3(0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    for (int y = 0; y < 4; y++)
+        for (int x = 0; x < 4; x++) {
+            float wx = x == 0 ? w0.x : (x == 1 ? w1.x : (x == 2 ? w2.x : w3.x));
+            float wy = y == 0 ? w0.y : (y == 1 ? w1.y : (y == 2 ? w2.y : w3.y));
+            ivec2 q = clamp(base + ivec2(x - 1, y - 1), ivec2(0, 0), last);
+            sum += texelFetch(history, q, 0).rgb * (wx * wy);
+            wsum += wx * wy;
+        }
+    return max(sum / max(wsum, 1e-4), vec3(0.0, 0.0, 0.0));
+}
+
+// Clips h toward the box's centre until it is inside the box (TAA's clip, not a clamp per channel: the colour
+// keeps its hue).
+vec3 clipToBox(vec3 h, vec3 centre, vec3 extent) {
+    vec3 d = h - centre;
+    vec3 u = abs(d) / max(extent, vec3(1e-5, 1e-5, 1e-5));
+    float m = max(max(u.x, u.y), u.z);
+    return m > 1.0 ? centre + d / m : h;
+}
+
 void main() {
     ivec2 at = ivec2(gl_FragCoord.xy);
     vec2 res = passTargetRes.xy;
@@ -183,6 +218,7 @@ void main() {
         } else {
             // Moving: where it was last frame, bilinearly, clamped into this frame's neighbourhood.
             vec2 pix = (uv + motion) * res - 0.5;
+            vec3 sharp = historyCatmullRom(pix, last);
             float weight = 0.0;
             ivec2 base = ivec2(floor(pix));
             vec2 f = pix - floor(pix);
@@ -197,7 +233,7 @@ void main() {
                 weight += w;
             }
             if (weight > 1e-3) {
-                historyColour /= weight;
+                historyColour = sharp;
                 historyLength = min(historyLength / weight, sfTemporal.z);
                 clampIt = true;
             } else {
@@ -205,16 +241,25 @@ void main() {
             }
         }
         if (clampIt) {
-            // The colour range of this frame's 3 x 3 neighbourhood (TAA's clamp; the AO taken as this pixel's).
-            vec3 lo = parts.temporal, hi = parts.temporal;
+            // This frame's neighbourhood, 3 x 3 a trace texel apart (the window's 3 x 3 was about one trace texel at a
+            // render scale of 0.4: it held the history to this frame's jittered sample and the detail the jitter had
+            // built flickered away): its mean and spread in YCoCg, the history clipped into mean +- 1.25 sigma, and
+            // never outside the samples' own range (the AO taken as this pixel's).
+            float stride = max(1.0, floor(sfTemporal.w + 0.5));
+            vec3 m1 = vec3(0.0, 0.0, 0.0), m2 = vec3(0.0, 0.0, 0.0);
+            vec3 lo = vec3(1e30, 1e30, 1e30), hi = vec3(-1e30, -1e30, -1e30);
             for (int y = -1; y <= 1; y++)
                 for (int x = -1; x <= 1; x++) {
-                    if (x == 0 && y == 0) continue;
-                    vec3 c = partsAt(clamp(at + ivec2(x, y), ivec2(0, 0), last), ao).temporal;
-                    lo = min(lo, c);
-                    hi = max(hi, c);
+                    vec3 c = x == 0 && y == 0 ? parts.temporal
+                                              : partsAt(clamp(at + ivec2(vec2(float(x), float(y)) * stride), ivec2(0, 0), last), ao).temporal;
+                    vec3 yc = sfToYCoCg(c);
+                    m1 += yc; m2 += yc * yc;
+                    lo = min(lo, yc); hi = max(hi, yc);
                 }
-            historyColour = clamp(historyColour, lo, hi);
+            m1 /= 9.0;
+            vec3 sigma = sqrt(max(m2 / 9.0 - m1 * m1, vec3(0.0, 0.0, 0.0)));
+            vec3 bmin = max(m1 - 1.25 * sigma, lo), bmax = min(m1 + 1.25 * sigma, hi);
+            historyColour = sfFromYCoCg(clipToBox(sfToYCoCg(historyColour), (bmin + bmax) * 0.5, (bmax - bmin) * 0.5));
         }
         newLength = min(historyLength + 1.0, moved ? sfTemporal.z : sfTemporal.y);
         accumulated = historyLength > 0.0 ? mix(historyColour, parts.temporal, 1.0 / newLength) : parts.temporal;

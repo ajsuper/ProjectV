@@ -22,7 +22,7 @@
 #define SANTA_FE_CLOUDS_SC
 
 uniform vec4 mtnClouds;   // x: coverage bias (-1..1), y: base m, z: top m, w: extinction per m at full density
-uniform vec4 sfCloudMap;  // the cloud-shadow map: x, y its corner (world x, z), z its size (m), w held (1)
+uniform vec4 sfCloudMap;  // the cloud-shadow map: x, y its corner (along sfSunBasis' right and up), z its size (m), w held (1)
 uniform vec4 mtnWind;     // xy: the weather's offset (m), z: shape scale (m per noise period), w: brightness
 // After Unreal's volumetric clouds and Guerrilla's Nubis (santa-fe-reference S23e):
 uniform vec4 sfCloudPhase; // x: phase G (forward), y: G2 (back), z: their blend, w: powder (dark sunward edges)
@@ -148,17 +148,39 @@ float sfHG(float mu, float g) {
     return 0.0795775 * (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * mu, 1e-4), 1.5);
 }
 
+// The cloud-shadow map's frame (S29a): it is drawn from the sun -- each texel a line toward the sun, laid out on
+// the plane square to it by `right` (level) and `up` (square to both) -- so a low sun's map follows the rays that
+// reach the land, where a map laid on the ground had a low sun's shadow come from 150 km off it. main.cpp
+// sfCloudMapFrame builds the same frame.
+void sfSunBasis(vec3 sun, out vec3 right, out vec3 up) {
+    right = abs(sun.y) < 0.999 ? normalize(cross(sun, vec3(0.0, 1.0, 0.0))) : vec3(1.0, 0.0, 0.0);
+    up = cross(right, sun);
+}
+
+// Height over the curved ground (S29a): y, plus how far the earth has fallen away below the level at the camera.
+// At a low sun the light reaches the cloud layer 50-150 km off, where that is 0.2-1.8 km.
+#define SF_EARTH_RADIUS 6371000.0
+float sfAltitude(vec3 q) {
+    vec2 h = q.xz - pjvViewPosition().xz;
+    return q.y + dot(h, h) / (2.0 * SF_EARTH_RADIUS);
+}
+
 // How much of the sun gets through the clouds to p (cloud shadows). `jitter` 0..1 offsets the samples.
 float sfCloudShadow(vec3 p, vec3 sun, float jitter) {
     if (!sfOn(SF_CLOUDS) || !sfOn(SF_CLOUD_SHADOW) || sun.y <= 0.01) return 1.0;
 #ifdef SF_HAS_CLOUD_SHADOW_MAP
-    // The map (cloud_shadow.frag), where it reaches: p carried along the sun to the layer's base. A point
-    // inside or over the layer takes it too (near enough). Beyond the map, the march below.
+    // The map (cloud_shadow.frag): the line through p toward the sun. Beyond it, the mean over the land round the
+    // camera where a pass has it (the march below, 6 samples over the first 12 km of a low sun's 100 km through
+    // the layer, was noise).
     if (sfCloudMap.w > 0.5) {
-        vec2 at = p.xz + sun.xz * ((mtnClouds.y - p.y) / sun.y);
-        vec2 uv = (at - sfCloudMap.xy) / sfCloudMap.z;
+        vec3 right, up;
+        sfSunBasis(sun, right, up);
+        vec2 uv = (vec2(dot(p, right), dot(p, up)) - sfCloudMap.xy) / sfCloudMap.z;
         if (all(greaterThan(uv, vec2(0.002, 0.002))) && all(lessThan(uv, vec2(0.998, 0.998))))
             return texture2DLod(cloudShadowMap, uv, 0.0).r;
+#ifdef SF_SKY_TEX_SLOT
+        if (mtnSkyCubeReady()) return mtnSkyTexel(6).r;
+#endif
     }
 #endif
     vec2 slab = sfCloudSlab(p, sun, 1.0e5, 0.0);
@@ -211,7 +233,12 @@ vec3 sfConeOffset(int j, vec3 sun) {
     return (t * cos(a) + b * sin(a)) * r;
 }
 
+// The sun's light at a cloud's point (S29c): through the planet's air to its own height, where a pass has the
+// atmosphere's tables -- so the clouds glow after the land's sunset; else the light given for the layer.
+vec3 sfCloudSun(vec3 p, vec3 given) { return mtnAtmoTables() ? mtnSunAt(p) : given; }
+
 vec3 sfCloudLight(vec3 p, float c, float sigma, float mu, vec3 sun, vec3 sunColour, vec3 skyUp, vec3 groundUp) {
+    sunColour = sfCloudSun(p, sunColour);
     float tauSun = 0.0;
     float ls = 60.0;
     float lt = ls * 0.5;

@@ -22,10 +22,14 @@
 //
 //   MOUNTAINS_SEED, MOUNTAINS_RINGS (11), MOUNTAINS_N (voxels from the centre to a ring's edge: 512)
 //   MOUNTAINS_CAMERA=plaza|atalaya|baldy|aerial|forest, or "x,z,above,yaw,pitch" (m, radians; yaw 0 = east)
-//   MOUNTAINS_CAPTURE=<file>       save a screenshot once everything has generated, then exit
+//   MOUNTAINS_CAPTURE=<file>       save a screenshot once everything has generated, then exit (MOUNTAINS_CAPTURE_FRAMES=n:
+//                                  the n frames after it too; MOUNTAINS_FLY=<m/s>, MOUNTAINS_FLY_SECONDS: in motion)
 //   SANTA_FE_WEATHER=<preset>      clear, scattered, overcast or storm (the panel's weather presets)
 //   SANTA_FE_RAW=1                 the display shows the scene's linear light x exposure, sRGB-encoded, nothing else
 //                                  (no bloom, grade, vignette or tone curve): a meter, with MOUNTAINS_EXPOSURE low
+//   SANTA_FE_FRAMES=1              every frame's wall and GPU time from 5 s in: percentiles and hitches at exit
+//   SANTA_FE_MOON=az,el            the moon's place in degrees, as MOUNTAINS_SUN (S29f)
+//   SANTA_FE_WINDOW=WxH            the window's size (1600x900); the bench and captures run at it
 //   SANTA_FE_OFF2=<bits>           the second flag set's features off (kSSS, kGlints, ...), as SANTA_FE_OFF the first's
 //   SANTA_FE_NO_LEAN=1             always the full trace pass (trace.frag), not trace_lean.frag where it would do
 //   SANTA_FE_BENCH=1|optimized|preset  GPU ms with each feature off in turn (all, the optimized preset's, or the preset
@@ -655,11 +659,15 @@ struct State {
     double camSpeed = 0, lastCamX = 0, lastCamZ = 0;   // horizontal, m/s (smoothed)
     Clock::time_point groundCheck;
     Clock::time_point started = Clock::now();
+    bool flying = false;              // MOUNTAINS_FLY: under way (from when the world had generated)
+    Clock::time_point flyStart;
     Clock::time_point lastReport = Clock::now();
     double frameMs = 0;
+    std::vector<std::array<float, 2>> frameLog;   // SANTA_FE_FRAMES: (wall ms, GPU ms) a frame
     int frames = 0;
     std::string capturePath;
     int captureStage = 0;
+    int captureExtra = std::getenv("MOUNTAINS_CAPTURE_FRAMES") ? std::atoi(std::getenv("MOUNTAINS_CAPTURE_FRAMES")) : 0;
     // SANTA_FE_DUMP_GBUFFER=<file>: with the capture, the trace's gPos and gFace read back once (S27b0)
     std::string dumpPath;
     bgfx::TextureHandle dumpTex[2] = {BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE};
@@ -671,6 +679,8 @@ struct State {
         uint32_t flags = 0;
         uint32_t flags2 = 0;   // the second word (mountains_far.sc SF2_*: a float holds 24 bits)
         float exposure = 1.7f, sunDisc = 1.0f;
+        // The night (S29f): the moon's place, exposure that adapts to the light on the land, the stars.
+        float moonAzimuth = 110.0f, moonElevation = 35.0f, autoExposure = 1.0f, stars = 1.0f;
         float cloudCoverage = -0.12f, cloudBase = 4300.0f, cloudTop = 9800.0f, cloudExtinction = 0.06f;
         float cloudScale = 11000.0f, cloudWindX = 0.0f, cloudWindZ = 0.0f;
         int cloudSteps = 56;
@@ -1008,27 +1018,106 @@ vec3 sunDirection(const State& st) {
     return vec3(float(std::sin(az) * std::cos(el)), float(std::sin(el)), float(std::cos(az) * std::cos(el)));
 }
 
-// The sun's light at height y: what is left after the air and the ozone above it along the sun's
-// path (Kasten-Young airmass), so a low sun is warm and dim, and nothing once it has set. The ozone
-// (Chappuis band) takes out green on a long path, which is why a twilight sky is blue and pink and not
-// green.
-vec3 sunIrradianceAt(const State& st, double y) {
-    const double el = st.look.sunElevation;
-    const double airmass = 1.0 / (std::sin(std::max(el, 0.0) * kPi / 180.0) + 0.50572 * std::pow(std::max(el, 0.0) + 6.07995, -1.6364));
-    const double beta[3] = {5.8e-6, 13.5e-6, 33.1e-6};
-    const double ozone[3] = {0.65e-6, 1.881e-6, 0.085e-6};   // per metre, at the layer's peak
-    const double ozoneThickness = 15000.0;                   // its column, as metres at peak density
+// The sun's light at height y (S29b): the top of the atmosphere's, through the planet's air along the sun's path
+// -- santa_fe_atmosphere.sc's model, marched here: a sphere (ground 6360 km, top 6460 km), Rayleigh, haze (Mie)
+// and ozone (its Chappuis band takes out green on a long path: a twilight sky blue and pink, not green). It was a
+// flat air with Kasten-Young's airmass, cut to nothing once the sun set at the camera; now a sun below the
+// horizon of a height still lights it (the clouds after the land), and the land's sunset is its own.
+vec3 sunTop() {
     const double white[3] = {1.0, 0.985, 0.955};
-    const double haze = 3.0e-6 * kAtmosphere.y * 1.11 * 1200.0 * std::exp(-y / 1200.0);
-    const double up = smoothstep(-1.0, 2.0, el);
-    float c[3];
-    for (int i = 0; i < 3; ++i) {
-        const double tau = (beta[i] * kAtmosphere.x * 8000.0 * std::exp(-y / 8000.0) + haze + ozone[i] * ozoneThickness) * airmass;
-        c[i] = float(kSunIrradiance * white[i] * std::exp(-tau) * up);
-    }
-    return vec3(c[0], c[1], c[2]);
+    return vec3(float(kSunIrradiance * white[0]), float(kSunIrradiance * white[1]), float(kSunIrradiance * white[2]));
 }
+// A body's light at height y, from its elevation (degrees) and its light above the air.
+vec3 throughAir(double elDeg, double y, vec3 top) {
+    constexpr double Rg = 6360000.0, Rt = 6460000.0, sunRadius = 0.004675;
+    const double el = elDeg * kPi / 180.0;
+    const double r = Rg + std::max(y, 0.0);
+    const double mu = std::sin(el);
+    // Behind the planet (softened over the disc, as the shader's terminator).
+    const double muHorizon = -std::sqrt(std::max(1.0 - (Rg / r) * (Rg / r), 0.0));
+    const double vis = smoothstep(-sunRadius, sunRadius, mu - muHorizon);
+    if (vis <= 0.0) return vec3(0.0f, 0.0f, 0.0f);
+    const double muc = std::max(mu, muHorizon);
+    const double dx = std::sqrt(std::max(1.0 - muc * muc, 0.0)), dy = muc;
+    // To the top: |(dx t, r + dy t)| = Rt.
+    const double b = r * dy, c = r * r - Rt * Rt;
+    const double tTop = -b + std::sqrt(std::max(b * b - c, 0.0));
+    const double betaR[3] = {5.802e-6, 13.558e-6, 33.1e-6}, ozone[3] = {0.650e-6, 1.881e-6, 0.085e-6};
+    double tau[3] = {0.0, 0.0, 0.0};
+    const int n = 64;
+    for (int i = 0; i < n; ++i) {   // dense near the start, where the air is
+        const double t0 = tTop * std::pow(double(i) / n, 2.0), t1 = tTop * std::pow(double(i + 1) / n, 2.0);
+        const double tm = 0.5 * (t0 + t1), dt = t1 - t0;
+        const double h = std::hypot(dx * tm, r + dy * tm) - Rg;
+        const double dR = std::exp(-h / 8000.0), dM = std::exp(-std::max(h, 1700.0) / 1200.0);   // SF_HAZE_FLOOR
+        const double dO = std::max(0.0, 1.0 - std::abs(h - 25000.0) / 15000.0);
+        for (int k = 0; k < 3; ++k)
+            tau[k] += (betaR[k] * kAtmosphere.x * dR + 3.0e-6 * kAtmosphere.y * 1.11 * dM + ozone[k] * dO) * dt;
+    }
+    return vec3(float(top.x * std::exp(-tau[0]) * vis), float(top.y * std::exp(-tau[1]) * vis), float(top.z * std::exp(-tau[2]) * vis));
+}
+vec3 sunIrradianceAt(const State& st, double y) { return throughAir(st.look.sunElevation, y, sunTop()); }
 vec3 sunIrradiance(const State& st) { return sunIrradianceAt(st, st.camera.y); }
+
+// ---- The night (S29f) ----
+constexpr double kLuxToUnits = kSunIrradiance / 128000.0;   // the sun above the air, ~128 klux
+
+vec3 azElDirection(double azDeg, double elDeg) {
+    const double az = azDeg * kPi / 180.0, el = elDeg * kPi / 180.0;
+    return vec3(float(std::sin(az) * std::cos(el)), float(std::sin(el)), float(std::cos(az) * std::cos(el)));
+}
+
+// The light on level land under a clear sky (lux) by the sun's elevation, sun and sky together: measured values
+// (the day's from the solar constant through the air, the twilight's from the nautical almanac's tables: 0 deg
+// ~700, civil twilight's end (-6) ~3.4, nautical (-12) ~0.008, astronomical (-18) the night's ~0.0006).
+double twilightLux(double el) {
+    static const double e[][2] = {{-18, 0.0006}, {-15, 0.002}, {-12, 0.008}, {-9, 0.15}, {-6, 3.4}, {-3, 60}, {0, 700},
+                                  {2, 2000}, {5, 5500}, {10, 15000}, {15, 25000}, {22, 45000}, {30, 60000}, {45, 85000},
+                                  {60, 100000}, {90, 110000}};
+    constexpr int n = int(sizeof(e) / sizeof(e[0]));
+    if (el <= e[0][0]) return e[0][1];
+    if (el >= e[n - 1][0]) return e[n - 1][1];
+    for (int i = 0; i + 1 < n; ++i)
+        if (el <= e[i + 1][0]) {
+            const double t = (el - e[i][0]) / (e[i + 1][0] - e[i][0]);
+            return std::exp(std::log(e[i][1]) + t * (std::log(e[i + 1][1]) - std::log(e[i][1])));
+        }
+    return e[n - 1][1];
+}
+
+// The moon above the air (lux): a full moon's 0.27, by its phase angle (Allen's magnitudes: 0.026 a + 4e-9 a^4).
+double moonTopLux(const State& st) {
+    const vec3 s = sunDirection(st), m = azElDirection(st.look.moonAzimuth, st.look.moonElevation);
+    const double elong = std::acos(std::clamp(double(s.x * m.x + s.y * m.y + s.z * m.z), -1.0, 1.0)) * 180.0 / kPi;
+    const double a = 180.0 - elong;   // the phase angle: 0 full
+    return 0.27 * std::pow(10.0, -0.4 * (0.026 * a + 4e-9 * a * a * a * a));
+}
+vec3 moonTop(const State& st) {
+    const double e = moonTopLux(st) * kLuxToUnits;
+    return vec3(float(e * 1.0), float(e * 0.96), float(e * 0.88));   // sunlight off grey-brown rock: a little warmer
+}
+double moonLandLux(const State& st) {
+    const vec3 t = throughAir(st.look.moonElevation, st.camera.y, vec3(1.0f, 1.0f, 1.0f));
+    return moonTopLux(st) * double(t.y) * std::max(std::sin(st.look.moonElevation * kPi / 180.0), 0.0);
+}
+
+// The scene's key light: the sun, or the moon once it lights the land more than the twilight does (the sun past
+// -4 degrees). The renderer's "sun" (sunDir, mtnSun, the tables, the shadows) is whichever it is.
+struct KeyLight { vec3 dir; vec3 top; double el; bool moon; };
+KeyLight keyLight(const State& st) {
+    const bool moon = st.look.sunElevation < -4.0 && st.look.moonElevation > 0.0 && moonLandLux(st) > twilightLux(st.look.sunElevation);
+    if (moon) return {azElDirection(st.look.moonAzimuth, st.look.moonElevation), moonTop(st), st.look.moonElevation, true};
+    return {sunDirection(st), sunTop(), st.look.sunElevation, false};
+}
+
+// Exposure that follows the light on the land (S29f), from the calibrated day's (22 degrees) -- in part: the eye
+// adapts less than the light falls (an exponent 0.8), so a moonlit night is still darker than the day.
+float adaptedExposure(const State& st) {
+    if (st.look.autoExposure < 0.5f) return st.look.exposure;
+    const double land = twilightLux(st.look.sunElevation) + moonLandLux(st) + 0.0008;   // + starlight and airglow
+    const double ratio = std::clamp(std::pow(twilightLux(22.0) / land, 0.8), 0.25, 3.0e5);
+    return float(st.look.exposure * ratio);
+}
 
 constexpr uint32_t kCloudNoiseTexture = 1;
 
@@ -1253,8 +1342,18 @@ void applyWeather(State::Look& L, Weather w) {
     }
 }
 
-void applyMode(State::Look& L, bool optimized) {
-    if (optimized) {
+// The presets: everything at full quality (reference), the first fast one (optimized, S4-S26), and one for 60 fps
+// at 1080p on an RTX 3070 (realtime, S28): the optimized preset with the cuts that measured cheapest for their look.
+enum class Mode { Reference, Optimized, Realtime };
+Mode startMode() {
+    const char* m = std::getenv("SANTA_FE_MODE");
+    if (m && std::string(m) == "reference") return Mode::Reference;
+    if (m && std::string(m) == "realtime") return Mode::Realtime;
+    return Mode::Optimized;
+}
+
+void applyMode(State::Look& L, Mode mode) {
+    if (mode != Mode::Reference) {
         L.flags = kOptimizedFlags;
         L.flags2 = (L.flags2 & kCloudBlocky) | kSmoothGround | kBevel | kSSS | kMotes | kGodRays | kAO | kFarShadowLow | kGlints | kFarAO | kSkyLight;
         L.renderScale = 0.5f;
@@ -1270,6 +1369,13 @@ void applyMode(State::Look& L, bool optimized) {
         L.upColour = L.upSun = L.upReflect = 2;
         L.upShadow = 0;
         L.upAO = 1;
+        if (mode == Mode::Realtime) {
+            // S28: what the 1080p forest view measured cheapest to give up (santa-fe-reference S28): the trace at
+            // 0.4 of the window (768 x 432 at 1080p, about the optimized preset's 800 x 450 at 1600 x 900), and the
+            // small extras -- motes and god rays (0.4 ms), glints and the far field's AO (0.3).
+            L.renderScale = 0.4f;
+            L.flags2 &= ~(kMotes | kGodRays | kGlints | kFarAO);
+        }
     } else {
         L.flags = kAllFeatures;
         L.flags2 = (L.flags2 & kCloudBlocky) | kSmoothGround | kBevel | kSSS | kMotes | kGodRays | kGlints;   // AO: the diffuse rays do it
@@ -1310,9 +1416,15 @@ void runBench(projv::Application& app, State& st) {
     }
     if (st.benchCase >= int(st.bench.size())) return;
     State::BenchCase& c = st.bench[size_t(st.benchCase)];
-    if (st.benchFrame == 0) applyMode(st.look, c.name.rfind("optimized", 0) == 0);
-    st.look.flags = c.flags;
+    if (st.benchFrame == 0) {
+        applyMode(st.look, c.name.rfind("optimized", 0) == 0 ? (startMode() == Mode::Realtime ? Mode::Realtime : Mode::Optimized) : Mode::Reference);
+        if (const char* f = std::getenv("SANTA_FE_SCALE")) st.look.renderScale = float(std::atof(f));   // a scale to try, in the bench too
+    }
+    if (c.name != "optimized preset") st.look.flags = c.flags;   // the preset case: the mode's own (realtime's differ)
     st.look.flags2 &= ~c.flags2Off;
+    // Features off to try, in the bench too (SANTA_FE_OFF, SANTA_FE_OFF2).
+    if (const char* f = std::getenv("SANTA_FE_OFF")) st.look.flags &= ~uint32_t(std::strtoul(f, nullptr, 0));
+    if (const char* f = std::getenv("SANTA_FE_OFF2")) st.look.flags2 &= ~uint32_t(std::strtoul(f, nullptr, 0));
     ++st.benchFrame;
     // The optimized preset's frame by pass, as a capture logs it (reportPasses).
     const bool byPass = c.name == "optimized preset";
@@ -1348,7 +1460,9 @@ void runBench(projv::Application& app, State& st) {
         st.benchSamples = 0;
         st.benchFrame = 0;
         if (++st.benchCase >= int(st.bench.size())) {
-            std::printf("\n%s\n", "santa_fe bench (GPU ms, this window):");
+            const projv::core::ivec2 traceRes = st.renderer->resources.textures.textureResolutions.at(3);
+            std::printf("\nsanta_fe bench (GPU ms; window %ux%u, trace %dx%d):\n", bgfx::getStats()->width, bgfx::getStats()->height,
+                        traceRes.x, traceRes.y);
             for (const std::string& l : st.benchLines) std::printf("  %s\n", l.c_str());
             app.closeRequested = true;
         }
@@ -1404,13 +1518,15 @@ void render(projv::Application& app) {
         const int phase = st.renderFrame % 16 + 1;
         // The jitter only when a layer is accumulated (S22a): else every frame traces the same rays.
         const bool anyTemporal = L.upColour == 2 || L.upSun == 2 || L.upReflect == 2 || L.upShadow == 2 || L.upAO == 2;
-        projv::core::vec4 jitter = anyTemporal ? projv::core::vec4(halton(phase, 2) - 0.5f, halton(phase, 3) - 0.5f, 0.0f, 0.0f)
+        static const bool noJitter = std::getenv("SANTA_FE_NO_JITTER") != nullptr;   // for measuring flicker (S28)
+        projv::core::vec4 jitter = anyTemporal && !noJitter ? projv::core::vec4(halton(phase, 2) - 0.5f, halton(phase, 3) - 0.5f, 0.0f, 0.0f)
                                                : projv::core::vec4(0.0f, 0.0f, 0.0f, 0.0f);
         projv::graphics::setUniformToValue(st.renderer, "jitterParams", jitter);
         // The resolve's history (restir-pt's): 64 frames still -- enough to average the jitter -- unless random
         // samples need converging (the reference mode's sun disc, diffuse ray, shafts: max samples); 16 moving.
         const bool noisy = (L.flags & (kSoftShadows | kDiffuse | kShafts)) != 0;
-        projv::core::vec4 temporal(reset ? 1.0f : 0.0f, noisy ? float(st.maxSamples) : std::min(64.0f, float(st.maxSamples)), 16.0f, 0.0f);
+        projv::core::vec4 temporal(reset ? 1.0f : 0.0f, noisy ? float(st.maxSamples) : std::min(64.0f, float(st.maxSamples)), 16.0f,
+                                   1.0f / std::clamp(L.renderScale, 0.2f, 1.0f));   // w: a trace texel, in window pixels (S28)
         projv::graphics::setUniformToValue(st.renderer, "sfTemporal", temporal);
         projv::core::vec4 recon(0.0f, 0.0f, st.look.reconstruct ? 0.0f : 1.0f, st.look.reconDebug ? 1.0f : 0.0f);
         projv::graphics::setUniformToValue(st.renderer, "sfRecon", recon);
@@ -1421,17 +1537,33 @@ void render(projv::Application& app) {
     }
     projv::core::vec4 frame(float(st.renderFrame), shifted ? 1.0f : 0.0f,
                             float(std::min(st.accumulated, st.maxSamples)), st.accumulated >= st.maxSamples ? 1e6f : 0.0f);
-    const vec3 sd = sunDirection(st);
+    const KeyLight key = keyLight(st);   // the sun, or the moon at night (S29f)
+    const vec3 sd = key.dir;
     projv::core::vec4 sun(sd.x, sd.y, sd.z, 0.0f);
     projv::core::vec4 params(L.sunDisc, float(L.cloudSteps), preview ? 1.0f : 0.0f, L.smoothGround);
-    const vec3 irr = sunIrradiance(st);
-    projv::core::vec4 mtnSun(irr.x, irr.y, irr.z, L.exposure);
+    const vec3 irr = throughAir(key.el, st.camera.y, key.top);
+    projv::core::vec4 mtnSun(irr.x, irr.y, irr.z, adaptedExposure(st));
     projv::core::vec4 atmos = kAtmosphere;
     projv::graphics::setUniformToValue(r, "windowRes", window);
     projv::graphics::setUniformToValue(r, "frameCount", frame);
     projv::graphics::setUniformToValue(r, "sunDir", sun);
     projv::graphics::setUniformToValue(r, "renderParams", params);
     projv::graphics::setUniformToValue(r, "mtnSun", mtnSun);
+    {   // The top of the atmosphere's sun, and whether the atmosphere's tables have settled (three frames, S29b).
+        projv::core::vec4 u_(key.top.x, key.top.y, key.top.z, st.renderFrame >= 3 ? 1.0f : 0.0f);
+        projv::graphics::setUniformToValue(r, "sfSunTop", u_);
+        // The moon (its direction; w 1 when it is the key light), the true sun (it lights the moon's face; w the
+        // sun above the air), and the night sky (x the stars' light per magnitude-0 star; y the sky's turn about
+        // the pole, radians; z the latitude; w a trace texel's angle, radians: the stars' footprint).
+        const vec3 md = azElDirection(L.moonAzimuth, L.moonElevation), sdt = sunDirection(st);
+        projv::core::vec4 moon(md.x, md.y, md.z, key.moon ? 1.0f : 0.0f);
+        projv::graphics::setUniformToValue(r, "sfMoon", moon);
+        projv::core::vec4 sunTrue(sdt.x, sdt.y, sdt.z, float(kSunIrradiance));
+        projv::graphics::setUniformToValue(r, "sfSunTrue", sunTrue);
+        const float texelAngle = float(2.0 * std::tan(50.0 * kPi / 360.0) / std::max(1.0, double(res.y) * std::clamp(double(L.renderScale), 0.2, 1.0)));
+        projv::core::vec4 night(float(2.08e-6 * kLuxToUnits) * L.stars, 1.1f, float(35.7 * kPi / 180.0), texelAngle);
+        projv::graphics::setUniformToValue(r, "sfNight", night);
+    }
     projv::graphics::setUniformToValue(r, "mtnAtmos", atmos);
     { projv::core::vec4 u_(float(L.flags), float(L.flags2), 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfFlags", u_); }
     { projv::core::vec4 u_(L.bevelWidth, L.bevelStrength, L.smoothMore, 0.0f); projv::graphics::setUniformToValue(r, "sfBevel", u_); }
@@ -1465,10 +1597,21 @@ void render(projv::Application& app) {
     { projv::core::vec4 u_(float(L.blockFactor), 0.0f, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfFar", u_); }
     { projv::core::vec4 u_(L.shadowSoftness, 24.0f, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfShadow", u_); }   // y: the blocker search, window pixels
     { projv::core::vec4 u_(float(snowlineAt()), 0.0f, 0.0f, 0.0f); projv::graphics::setUniformToValue(r, "sfSnow", u_); }
-    // The cloud-shadow map (cloud_shadow.frag): 32 km round the camera, its corner snapped to its texels.
+    // The cloud-shadow map (cloud_shadow.frag): 32 km round the camera, drawn from the sun (S29a: santa_fe_clouds.sc
+    // sfSunBasis, the same frame here), its corner snapped to its texels.
     {
         const double size = 32000.0, texel = size / 256.0;
-        const double cx = std::floor(st.camera.x / texel) * texel - size * 0.5, cz = std::floor(st.camera.z / texel) * texel - size * 0.5;
+        const double sx = sd.x, sy = sd.y, sz = sd.z;
+        double rx = 1.0, ry = 0.0, rz = 0.0;
+        if (std::abs(sy) < 0.999) {   // right = normalize(cross(sun, +y)), up = cross(right, sun)
+            rx = -sz; rz = sx;
+            const double n = std::hypot(rx, rz);
+            rx /= n; rz /= n;
+        }
+        const double ux = ry * sz - rz * sy, uy = rz * sx - rx * sz, uz = rx * sy - ry * sx;
+        const double pu = st.camera.x * rx + st.camera.y * ry + st.camera.z * rz;
+        const double pv = st.camera.x * ux + st.camera.y * uy + st.camera.z * uz;
+        const double cx = std::floor(pu / texel) * texel - size * 0.5, cz = std::floor(pv / texel) * texel - size * 0.5;
         static const bool noMap = std::getenv("SANTA_FE_NO_CLOUDMAP") != nullptr;
         projv::core::vec4 u_(float(cx), float(cz), float(size), noMap ? 0.0f : 1.0f);
         projv::graphics::setUniformToValue(r, "sfCloudMap", u_);
@@ -1517,7 +1660,7 @@ void render(projv::Application& app) {
             break;
         }
     projv::graphics::setUniformToValue(r, "mtnVoxelBox", voxelBox);
-    const vec3 air = sunIrradianceAt(st, st.camera.y + 6000.0);
+    const vec3 air = throughAir(keyLight(st).el, st.camera.y + 6000.0, keyLight(st).top);
     projv::core::vec4 mtnSunAir(air.x, air.y, air.z, 0.0f);
     projv::graphics::setUniformToValue(r, "mtnSunAir", mtnSunAir);
     {
@@ -1598,10 +1741,13 @@ void lookPanel(projv::Application& app) {
     ImGui::SameLine();
     if (ImGui::SmallButton("storm")) applyWeather(L, Weather::Storm);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Presets: the clouds' cover, height, kind and rain, and the haze, together (santa-fe-reference S23f)");
-    if (ImGui::Button("Optimized mode")) applyMode(L, true);
+    if (ImGui::Button("Optimized mode")) applyMode(L, Mode::Optimized);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shadows, far trees, clouds, the air and the props; no traced sky light; cheaper clouds and detail");
     ImGui::SameLine();
-    if (ImGui::Button("Reference mode")) applyMode(L, false);
+    if (ImGui::Button("Reference mode")) applyMode(L, Mode::Reference);
+    ImGui::SameLine();
+    if (ImGui::Button("Realtime mode")) applyMode(L, Mode::Realtime);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("60 fps at 1080p on an RTX 3070: the optimized mode with cheaper parts (santa-fe-reference S28)");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Everything on, at full quality: slow, converges over many frames");
     ImGui::SliderFloat("render scale", &L.renderScale, 0.25f, 1.0f, "%.2f");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("The trace pass's share of the window each way; the voxel reconstruction and the resolve rebuild the rest");
@@ -1829,8 +1975,10 @@ void lookPanel(projv::Application& app) {
 void startup(projv::Application& app) {
     auto& ri = app.world.ctx().emplace<projv::graphics::RenderInstance>();
     // A capture asks for exactly its size, so a tiling window manager floats it rather than fitting it.
-    if (std::getenv("MOUNTAINS_CAPTURE")) ri.resizable = false;
-    ri.initialize(1600, 900, "ProjectV Santa Fe (reference)");
+    if (std::getenv("MOUNTAINS_CAPTURE") || std::getenv("SANTA_FE_BENCH")) ri.resizable = false;   // and a bench
+    int winW = 1600, winH = 900;   // SANTA_FE_WINDOW=WxH (the realtime target is 1920x1080, S28)
+    if (const char* w = std::getenv("SANTA_FE_WINDOW")) std::sscanf(w, "%dx%d", &winW, &winH);
+    ri.initialize(winW, winH, "ProjectV Santa Fe (reference)");
     projv::graphics::installPlatform(app, ri);
     auto& scene = app.world.ctx().emplace<projv::Scene>();
     auto& st = app.world.ctx().emplace<State>();
@@ -1844,6 +1992,7 @@ void startup(projv::Application& app) {
     st.cameraAbove = std::max(0.0, st.camera.y - st.land->height(st.camera.x, st.camera.z, 8.0));
     // MOUNTAINS_SUN="azimuth,elevation" in degrees (azimuth clockwise from north).
     if (const char* sun = std::getenv("MOUNTAINS_SUN")) std::sscanf(sun, "%f,%f", &st.look.sunAzimuth, &st.look.sunElevation);
+    if (const char* moon = std::getenv("SANTA_FE_MOON")) std::sscanf(moon, "%f,%f", &st.look.moonAzimuth, &st.look.moonElevation);   // "azimuth,elevation" (S29f)
     st.pool = std::make_unique<Pool>(*st.land, st.palette, st.props.shapes.empty() ? nullptr : &st.props, std::max(2u, std::thread::hardware_concurrency() - 2), st.clipmap.voxelRings);
     placeRings(st.clipmap, scene, st.pool.get(), st.camera.x, st.camera.z, st.cameraAbove);
     readLookEnvironment();
@@ -1851,8 +2000,8 @@ void startup(projv::Application& app) {
                       st.clipmap.rings, st.clipmap.span(), st.pool->threads(),
                       cellSize(st.clipmap.rings - 1) * double(st.clipmap.radius) / 1000.0);
 
-    // SANTA_FE_MODE=reference for everything at full quality; optimized by default.
-    applyMode(st.look, !(std::getenv("SANTA_FE_MODE") && std::string(std::getenv("SANTA_FE_MODE")) == "reference"));
+    // SANTA_FE_MODE=reference for everything at full quality, realtime for 60 fps at 1080p; optimized by default.
+    applyMode(st.look, startMode());
     if (const char* f = std::getenv("SANTA_FE_SCALE")) st.look.renderScale = float(std::atof(f));
     if (const char* w = std::getenv("SANTA_FE_WEATHER")) {   // clear, scattered, overcast, storm (S23f)
         const std::string k = w;
@@ -2120,7 +2269,16 @@ void stream(projv::Application& app) {
     auto& scene = app.world.ctx().get<projv::Scene>();
     // MOUNTAINS_FLY=<m/s>: fly straight ahead, for testing whether streaming keeps up.
     static const double fly = std::getenv("MOUNTAINS_FLY") ? std::atof(std::getenv("MOUNTAINS_FLY")) : 0.0;
-    if (fly > 0.0) {
+    // From once every ring has generated (S28): a flight from a half-loaded world measured the loading.
+    if (fly > 0.0 && !st.flying) {
+        int pending = 0;
+        for (const Ring& r : st.clipmap.ring) pending += r.pending;
+        if (pending == 0 && std::chrono::duration<double>(Clock::now() - st.started).count() > 2.0) {
+            st.flying = true;
+            st.flyStart = Clock::now();
+        }
+    }
+    if (fly > 0.0 && st.flying) {
         st.camera.x += std::cos(st.camera.yaw) * fly * app.time().delta;
         st.camera.z += std::sin(st.camera.yaw) * fly * app.time().delta;
     }
@@ -2157,6 +2315,14 @@ void stream(projv::Application& app) {
 
     st.frameMs += app.time().unscaledDelta * 1000.0;
     ++st.frames;
+    // SANTA_FE_FRAMES=1 (S28): every frame's wall time and GPU time from 5 s in, summarised at exit -- what a
+    // player feels (hitches) rather than an average.
+    static const bool logFrames = std::getenv("SANTA_FE_FRAMES") != nullptr;
+    if (logFrames && std::chrono::duration<double>(Clock::now() - st.started).count() > 5.0) {
+        const bgfx::Stats* gs = bgfx::getStats();
+        const double gpu = gs && gs->gpuTimerFreq > 0 ? double(gs->gpuTimeEnd - gs->gpuTimeBegin) * 1000.0 / double(gs->gpuTimerFreq) : 0.0;
+        st.frameLog.push_back({float(app.time().unscaledDelta * 1000.0), float(gpu)});
+    }
     if (Clock::now() - st.lastReport > std::chrono::seconds(2)) {
         report(st, scene);
         st.lastReport = Clock::now();
@@ -2171,8 +2337,9 @@ void stream(projv::Application& app) {
         for (const Ring& r : st.clipmap.ring) pending += r.pending;
         const double elapsed = std::chrono::duration<double>(Clock::now() - st.started).count();
         if (st.captureStage == 0) {
-            const double flySeconds = fly > 0.0 ? 20.0 : 0.0;
-            if ((fly > 0.0 && elapsed > flySeconds) || (fly <= 0.0 && pending == 0 && elapsed > 2.0) || elapsed > 120.0) {
+            static const double flySeconds = fly > 0.0 ? (std::getenv("MOUNTAINS_FLY_SECONDS") ? std::atof(std::getenv("MOUNTAINS_FLY_SECONDS")) : 20.0) : 0.0;
+            const bool flown = st.flying && std::chrono::duration<double>(Clock::now() - st.flyStart).count() > flySeconds;
+            if ((fly > 0.0 && flown) || (fly <= 0.0 && pending == 0 && elapsed > 2.0) || elapsed > 120.0) {
                 st.captureStage = 1;
                 st.settledAt = Clock::now();
                 st.settledFrames = 0;
@@ -2185,7 +2352,8 @@ void stream(projv::Application& app) {
             ++st.settledFrames;
             const double s = std::chrono::duration<double>(Clock::now() - st.settledAt).count();
             // The reference renderer converges: wait for its samples (a scene change starts them over).
-            const bool done = st.renderer ? st.accumulated >= st.captureSamples : s >= 3.0;
+            // Flying, the samples never accumulate (every frame moves): the frame as it is in motion, after a second.
+            const bool done = fly > 0.0 ? s >= 1.0 : st.renderer ? st.accumulated >= st.captureSamples : s >= 3.0;
             if (done) {
                 projv::core::info("[SANTA FE] {} samples", st.accumulated);
                 const auto& ri = app.world.ctx().get<projv::graphics::RenderInstance>();
@@ -2195,10 +2363,16 @@ void stream(projv::Application& app) {
                 st.profiling = false;
                 reportPasses(st, app.world.ctx().get<projv::graphics::RenderInstance>());
                 bgfx::requestScreenShot(BGFX_INVALID_HANDLE, st.capturePath.c_str());
+                projv::core::info("[SANTA FE] captured at MOUNTAINS_CAMERA={:.3f},{:.3f},{:.3f},{:.5f},{:.5f} SANTA_FE_CAMERA_ABS=1", st.camera.x,
+                                  st.camera.z, st.camera.y, st.camera.yaw, st.camera.pitch);
                 if (!st.dumpPath.empty()) dumpGBufferStart(st);
                 st.captureStage = 2;
             }
-        } else if (++st.captureStage > 12) {
+        } else if (st.captureStage >= 2 && st.captureStage < 2 + st.captureExtra) {
+            // MOUNTAINS_CAPTURE_FRAMES=n: the n frames after it too (<path>.1 .. .n), for flicker in motion (S28).
+            bgfx::requestScreenShot(BGFX_INVALID_HANDLE, (st.capturePath + "." + std::to_string(st.captureStage - 1)).c_str());
+            ++st.captureStage;
+        } else if (++st.captureStage > 12 + st.captureExtra) {
             if (!st.dumpPath.empty()) dumpGBufferWrite(st);
             app.closeRequested = true;
         }
@@ -2235,6 +2409,18 @@ void dumpGBufferWrite(State& st) {
 
 void shutdown(projv::Application& app) {
     State& st = app.world.ctx().get<State>();
+    if (!st.frameLog.empty()) {
+        for (int k = 0; k < 2; ++k) {
+            std::vector<float> v;
+            for (const auto& f : st.frameLog) v.push_back(f[size_t(k)]);
+            std::sort(v.begin(), v.end());
+            auto pct = [&](double p) { return v[std::min(v.size() - 1, size_t(p * double(v.size())))]; };
+            size_t over16 = 0, over33 = 0;
+            for (float x : v) { over16 += x > 16.7f; over33 += x > 33.3f; }
+            std::printf("santa_fe frames (%s, %zu): p50 %.2f  p95 %.2f  p99 %.2f  max %.2f ms; over 16.7 ms: %zu, over 33.3: %zu\n",
+                        k == 0 ? "wall" : "GPU", v.size(), pct(0.5), pct(0.95), pct(0.99), v.back(), over16, over33);
+        }
+    }
     st.pool.reset();
     projv::graphics::destroyGPUData(app.world.ctx().get<projv::GPUData>());
 }

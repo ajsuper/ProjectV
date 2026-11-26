@@ -34,6 +34,7 @@ SAMPLER2D(farCanopy, 6);
 #define SF_SKY_TEX_SLOT 7   // sky_ambient.frag (S23)
 
 #define PI 3.14159265358979
+#define SF_ATMO_SLOT 8   // the atmosphere's tables (atmosphere.frag, S29b)
 #include <mountains_sky.sc>
 #include <mountains_far.sc>
 #include <santa_fe_clouds.sc>

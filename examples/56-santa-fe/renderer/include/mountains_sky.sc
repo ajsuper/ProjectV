@@ -48,6 +48,15 @@ bool mtnSkyCubeReady() { return false; }
 #define SUN_DIR   (sunDir.xyz)
 #define SUN_COLOR (mtnSun.rgb)
 
+// The atmosphere as a planet's (S29b): where a pass binds the tables (SF_ATMO_SLOT), the sky, the air in front of
+// things and the sun's light come from them; elsewhere the flat layers below.
+#include <santa_fe_atmosphere.sc>
+#ifdef SF_ATMO_SLOT
+bool mtnAtmoTables() { return sfAtmoReady(); }
+#else
+bool mtnAtmoTables() { return false; }
+#endif
+
 #define MTN_BETA_R vec3(5.8e-6, 13.5e-6, 33.1e-6)   // per metre, at sea-level density
 #define MTN_BETA_M 3.0e-6                           // per metre, haze at density 1
 #define MTN_H_R 8000.0
@@ -63,7 +72,7 @@ float mtnLayer(float y0, float dy, float d, float H) {
 }
 
 // Transmittance T and in-scattered light L along `dir` from `origin` for `d` metres.
-void mtnAtmosphere(vec3 origin, vec3 dir, float d, out vec3 T, out vec3 L) {
+void mtnAtmosphereFlat(vec3 origin, vec3 dir, float d, out vec3 T, out vec3 L) {
     float lr = mtnLayer(origin.y, dir.y, d, MTN_H_R);
     float lm = mtnLayer(origin.y, dir.y, d, MTN_H_M);
     vec3  sR = MTN_BETA_R * mtnAtmos.x * lr;
@@ -79,6 +88,36 @@ void mtnAtmosphere(vec3 origin, vec3 dir, float d, out vec3 T, out vec3 L) {
     vec3  multi = (sR + vec3(sM, sM, sM)) * share * (0.0796 * mtnAtmos.w);
     // A low sun lights the air less: the scattered light fades with it, as the sun's colour has.
     L = mtnSunAir.rgb * (single + multi);
+}
+
+// Transmittance T and in-scattered light L along `dir` from `origin` for `d` metres: from the camera, the
+// aerial-perspective froxels; from elsewhere, a march through the tables (S29b).
+void mtnAtmosphere(vec3 origin, vec3 dir, float d, out vec3 T, out vec3 L) {
+#ifdef SF_ATMO_SLOT
+    if (sfAtmoReady()) {
+        vec3 c = pjvViewPosition();
+        if (dot(origin - c, origin - c) < 1.0 && d <= SF_AP_RANGE) {
+            vec4 ap = sfAerialFromCamera(dir, d);
+            L = ap.rgb;
+            T = vec3(ap.a, ap.a, ap.a);
+            return;
+        }
+        vec3 P = sfPlanetPos(origin);
+        float tG = sfRaySphere(P, dir, SF_RG), tT = sfRaySphere(P, dir, SF_RT);
+        float tMax = min(d, tG > 0.0 ? tG : (tT > 0.0 ? tT : d));
+        L = sfIntegrate(P, dir, tMax, SUN_DIR, 10, true, T) * sfSunTop.rgb;
+        return;
+    }
+#endif
+    mtnAtmosphereFlat(origin, dir, d, T, L);
+}
+
+// The sun's light at a point (S29b/c): through the planet's air to it, so a valley is in its sunset before a peak.
+vec3 mtnSunAt(vec3 p) {
+#ifdef SF_ATMO_SLOT
+    if (sfAtmoReady()) return sfSunLightAt(p, SUN_DIR);
+#endif
+    return SUN_COLOR;
 }
 
 // How much of the sun reaches the land round the camera (the clouds' shadow on it, on average): its bounce.
@@ -107,6 +146,29 @@ float mtnAirLit() { return mix(1.0, mtnGroundLit(), sfOvercast.y); }
 // The sky as seen: the air to the top of the atmosphere (or far off along the horizon), and the sun.
 vec3 mtnSkyView(vec3 dir) {
     vec3 T, L;
+#ifdef SF_ATMO_SLOT
+    if (sfAtmoReady()) {
+        L = sfSkyViewLight(dir, SUN_DIR);
+        // The disc: the sun's light at the camera, limb-darkened (Neckel and Labs' fit, a 5th-order polynomial in
+        // the cosine across it), as radiance over its solid angle.
+        // The night sky and the moon behind the air (S29f): dimmed by it on their way down.
+        vec3 Pc = sfPlanetPos(pjvViewPosition());
+        float rc = length(Pc);
+        vec3 Tdir = sfTransmittanceToTop(rc, dot(Pc / rc, dir));
+        L += (sfNightSky(dir) + sfMoonDisc(dir)) * Tdir;
+        float cosA = dot(dir, SUN_DIR);
+        float cosR = cos(SF_SUN_ANGULAR_RADIUS);
+        if (cosA > cosR && sfMoon.w < 0.5) {   // the sun's disc (when the key light is the moon, sfMoonDisc drew it)
+            float x = clamp(sqrt(max(1.0 - cosA * cosA, 0.0)) / sin(SF_SUN_ANGULAR_RADIUS), 0.0, 1.0);
+            float m = sqrt(max(1.0 - x * x, 0.0));
+            vec3 u = vec3(1.0, 1.0, 1.0);
+            vec3 a = vec3(0.397, 0.503, 0.652);   // limb darkening, red .. blue (Hillaire's sky, after Neckel and Labs)
+            vec3 limb = pow(vec3(m, m, m), a);
+            L += mtnSunAt(pjvViewPosition()) * limb / (3.14159265 * SF_SUN_ANGULAR_RADIUS * SF_SUN_ANGULAR_RADIUS) * 0.002;
+        }
+        return L;
+    }
+#endif
     float d = dir.y > 0.0 ? 1.0e6 : 4.0e5;
     mtnAtmosphere(pjvViewPosition(), dir, d, T, L);
     if (dir.y <= 0.0) L += T * MTN_GROUND_ALBEDO * SUN_COLOR * max(SUN_DIR.y, 0.0) * 0.3183;   // the plains beyond
@@ -117,6 +179,9 @@ vec3 mtnSkyView(vec3 dir) {
 // The light arriving from a direction, for the ambient term: the sky above, the sunlit ground below.
 vec3 skyColor(vec3 dir) {
     if (dir.y < 0.0) return mtnGroundUp();
+#ifdef SF_ATMO_SLOT
+    if (sfAtmoReady()) return sfSkyViewLight(dir, SUN_DIR);
+#endif
     vec3 T, L;
     mtnAtmosphere(pjvViewPosition(), dir, 1.0e6, T, L);
     return L;

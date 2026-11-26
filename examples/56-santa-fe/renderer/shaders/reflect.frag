@@ -28,6 +28,7 @@ $input v_texcoord0
 #include <pjv_engine.sc>
 #include <pjv_camera.sc>
 #define SF_SKY_TEX_SLOT 12   // sky_ambient.frag (S23): after the clouds (10, 11)
+#define SF_ATMO_SLOT 13   // the atmosphere's tables (atmosphere.frag, S29b)
 #include <mountains_sky.sc>
 
 // ---- Tunables ---------------------------------------------------------------------------------------

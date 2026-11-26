@@ -203,6 +203,22 @@
         {
             "name": "sfFogTint",
             "type": "vec4"
+        },
+        {
+            "name": "sfSunTop",
+            "type": "vec4"
+        },
+        {
+            "name": "sfMoon",
+            "type": "vec4"
+        },
+        {
+            "name": "sfSunTrue",
+            "type": "vec4"
+        },
+        {
+            "name": "sfNight",
+            "type": "vec4"
         }
     ],
     "shaders": [
@@ -333,6 +349,10 @@
         {
             "shaderID": 32,
             "path": "./renderer/shaders/trace_lean.bin"
+        },
+        {
+            "shaderID": 33,
+            "path": "./renderer/shaders/atmosphere.bin"
         }
     ],
     "textures": [
@@ -759,6 +779,15 @@
             "sizeMode": "relative",
             "scale": 0.25,
             "origin": "CreateNew"
+        },
+        {
+            "texID": 54,
+            "name": "atmosphere",
+            "format": "RGBA32_FLOAT",
+            "resX": 1024,
+            "resY": 224,
+            "sizeMode": "fixed",
+            "origin": "CreateNew"
         }
     ],
     "framebuffers": [
@@ -944,6 +973,12 @@
             "textureIDs": [
                 52,
                 53
+            ]
+        },
+        {
+            "fboID": 30,
+            "textureIDs": [
+                54
             ]
         }
     ]

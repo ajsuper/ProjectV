@@ -60,6 +60,7 @@ SAMPLER2D(cloudShadowMap, 6);   // cloud_shadow.frag
 
 #define PI 3.14159265358979
 
+#define SF_ATMO_SLOT 8   // the atmosphere's tables (atmosphere.frag, S29b)
 #include <mountains_sky.sc>
 #include <mountains_far.sc>
 #include <santa_fe_clouds.sc>
@@ -670,7 +671,7 @@ void main() {
         // visibility and blocker distance, and is added back after a screen-space blur sized by that distance.
         float visUse = blur ? 1.0 : vis0;
         float cloud0 = visUse > 0.0 ? sfCloudShadow(cloudAt, SUN_DIR, faceJ) : 0.0;
-        vec3 sunAt = SUN_COLOR * visUse * cloud0;
+        vec3 sunAt = mtnSunAt(s0.p) * visUse * cloud0;   // the sun at the hit, through the air to it (S29c)
         // Leaves wrap the light round their terminator (SF2_SSS): a crown is many leaves, lit past its edge.
         bool leafy = s0.trans > 0.2 && sfOn2(SF2_SSS);   // foliage (grass has a little transmission too: it only softens shadows)
         float ndl = leafy ? max((dot(s0.n, sunJ) + sfSSS.z) / (1.0 + sfSSS.z), 0.0) : max(dot(s0.n, sunJ), 0.0);
@@ -788,7 +789,7 @@ void main() {
             float cloudS = cloud0 > 0.0 ? cloud0 : sfCloudShadow(cloudAt, SUN_DIR, faceJ);
             float lobe = pow(clamp(dot(camD, sunJ), 0.0, 1.0), 3.0) + 0.22;
             float rim = s0.face.w > 0.0 && !s0.far ? sfLeafEdgeGlow(s0.p, s0.nf, s0.face.xyz, s0.face.w) : 1.0;
-            sss = s0.albedo * vec3(1.3, 1.08, 0.55) / PI * SUN_COLOR * cloudS * (lobe * rim * sfSSS.x);
+            sss = s0.albedo * vec3(1.3, 1.08, 0.55) / PI * mtnSunAt(s0.p) * cloudS * (lobe * rim * sfSSS.x);
             // With the shadow blur, it goes out with the sun's light and takes the blurred visibility (it fades
             // across a shadow's edge rather than switching), and the far field's shadow; else this ray's own.
             if (blur) { direct += sss; sssOut = sss; sss = vec3(0.0, 0.0, 0.0); }
@@ -802,7 +803,7 @@ void main() {
         if (s1.hit) {
             if (!sfOn(SF_SHADOWS) && sfOn(SF_BOUNCE_SUN)) vis1 = 1.0;
             float cloud1 = vis1 > 0.0 ? sfCloudShadow(s1.p, SUN_DIR, fract(cloudJ + 0.5)) : 0.0;
-            vec3 b = s1.albedo / PI * SUN_COLOR * vis1 * cloud1 * max(dot(s1.n, sunJ), 0.0);
+            vec3 b = s1.albedo / PI * mtnSunAt(s1.p) * vis1 * cloud1 * max(dot(s1.n, sunJ), 0.0);
             // The bounce's own ambient: the sky over it, partly hidden (a second bounce, roughly).
             b += s1.albedo * mtnSkyFrom(s1.p, normalize(s1.n + vec3(0.0, 1.0, 0.0))) * 0.55;
             inL = mtnAerial(b, s0.p, inDir, s1.t);
@@ -823,7 +824,7 @@ void main() {
         // and rim catch the light. With the sun (and so under its shadow and the shadow blur).
         if (leafy) {
             vec3 hh = normalize(sunJ - camD);
-            vec3 sheen = sqrt(max(s0.albedo, vec3(0.0, 0.0, 0.0))) * SUN_COLOR * cloud0 * pow(max(dot(s0.n, hh), 0.0), 16.0) * sfSSS.w * 0.18;
+            vec3 sheen = sqrt(max(s0.albedo, vec3(0.0, 0.0, 0.0))) * mtnSunAt(s0.p) * cloud0 * pow(max(dot(s0.n, hh), 0.0), 16.0) * sfSSS.w * 0.18;
             if (blur) direct += sheen; else direct += sheen * vis0;
         }
         colour = (blur ? indirect : direct + indirect) + sss;

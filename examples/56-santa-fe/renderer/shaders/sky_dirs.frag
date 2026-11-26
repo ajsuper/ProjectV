@@ -34,6 +34,7 @@ SAMPLER2D(cloudShadowMap, 5);
 uniform vec4 renderParams;   // y: the camera rays' cloud steps
 
 #define PI 3.14159265358979
+#define SF_ATMO_SLOT 7   // the atmosphere's tables (atmosphere.frag, S29b)
 #include <mountains_sky.sc>
 #include <mountains_far.sc>
 #include <santa_fe_clouds.sc>
@@ -82,7 +83,7 @@ void main() {
         vec3 p = o + d * dist;
         vec3 T, Lair;
         mtnAtmosphere(o, d, dist, T, Lair);
-        L = T * MTN_GROUND_ALBEDO * SUN_COLOR * max(SUN_DIR.y, 0.0) * 0.3183 * sfCloudShadow(p, SUN_DIR, 0.5) + Lair * mtnAirLit();
+        L = T * MTN_GROUND_ALBEDO * mtnSunAt(p) * max(SUN_DIR.y, 0.0) * 0.3183 * sfCloudShadow(p, SUN_DIR, 0.5) + Lair * mtnAirLit();
     }
     if (any(isnan(L)) || any(isinf(L))) L = vec3(0.0, 0.0, 0.0);
     gl_FragColor = vec4(max(L, vec3(0.0, 0.0, 0.0)), 1.0);
