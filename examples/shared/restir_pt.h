@@ -49,6 +49,8 @@ namespace restir_pt {
     constexpr float SHAFT_FALLOFF_VOXELS = 48.0f;
     constexpr float SHAFT_PHASE_G = 0.6f;
     constexpr float SHAFT_HISTORY = 4.0f;   // short: ao_apply's radial blur takes the noise out
+    constexpr float GI_HISTORY = 24.0f;     // the diffuse GI's history, frames at most; gi_accumulate cuts it where the light changed
+    constexpr float SUN_JUMP_DEGREES = 2.0f; // a sun move larger than this in one frame is a new light (restir_common.sc)
     // The aerial perspective: a thin haze over the whole scene, on top of the ground fog -- what makes the far
     // distance read as far. It thickens with distance (restirFog: its density grows from nothing at the camera
     // to AIR_DEPTH e-folds per fog length at one fog length out), so what is near stays crisp and only the
@@ -135,7 +137,7 @@ namespace restir_pt {
         vec3  sunDirection{0.0f, 1.0f, 0.0f};   // normalized
         float overcast = 0.0f;    // 0 clear .. 1 a closed cloud deck (sunDir.w; pjv_sun_sky.sc's pjvOvercast)
         bool  moved = false;      // the camera or the sun
-        bool  sunMoved = false;   // the sun: the light changed, so every history starts over
+        bool  sunMoved = false;   // the sun: the light changed, so every history is kept short
         bool  first = false;      // the first frame drawn
         int   count = 0;          // frames so far
         vec2  window{1.0f};
@@ -250,19 +252,27 @@ namespace restir_pt {
         camera.forward = frame.direction;
         projv::graphics::setCamera(*renderer, camera);
         vec4 sunDir{frame.sunDirection, std::clamp(frame.overcast, 0.0f, 1.0f)};
-        // z: the sun moved -- the light changed, so every history (the reservoirs' cached light included) starts over.
-        vec4 frameCount{float(frame.count), frame.moved ? 1.0f : 0.0f, frame.sunMoved ? 1.0f : 0.0f, 0.0f};
+        // z: the sun moved -- 1 a step of an orbit or a drag (or the overcast changed): the histories are kept,
+        // short; 2 a jump of more than SUN_JUMP_DEGREES: the light is new, and the reservoirs' cached light, the
+        // shafts and the image start over (restir_common.sc).
+        static vec3 lastSun = frame.sunDirection;
+        const float sunStep = std::acos(std::clamp(dot(lastSun, frame.sunDirection), -1.0f, 1.0f)) * 180.0f / 3.14159265f;
+        lastSun = frame.sunDirection;
+        const bool sunJumped = frame.sunMoved && sunStep > SUN_JUMP_DEGREES;
+        vec4 frameCount{float(frame.count), frame.moved ? 1.0f : 0.0f, sunJumped ? 2.0f : frame.sunMoved ? 1.0f : 0.0f, 0.0f};
         vec4 reuse{s.reuse && s.temporal ? 1.0f : 0.0f, s.reuse && s.spatial ? 1.0f : 0.0f, s.visibility ? 1.0f : 0.0f, 4.0f};   // temporal, spatial, visibility, M cap
-        vec4 denoise{s.atrous, s.raw ? 0.0f : 1.0f, float(s.view), 12.0f};   // a-trous, GI accumulation, view, its cap
+        vec4 denoise{s.atrous, s.raw ? 0.0f : 1.0f, float(s.view), GI_HISTORY};   // a-trous, GI accumulation, view, its cap
         vec4 jitter{float(offset[0]), float(offset[1]), float(giStride), frame.first ? 1.0f : 0.0f};
         // w: one render texel's width per unit of distance, for the tests that ask "is this the same surface?".
         const float renderHeight = std::max(frame.window.y * RENDER_SCALE, 1.0f);
         const float pixelWidth = 2.0f * std::tan(camera.verticalFovDegrees * 0.5f * 3.14159265f / 180.0f) / renderHeight;
-        // The image's history: none when the sun moved (the light is new); short while the camera moves, so
-        // changing light is not dragged along; 64 frames on a still view -- enough to average the jitter and
-        // what noise is left, short enough that the GI's own history, not this one, decides how fast it settles.
+        // The image's history: none when the sun jumped (the light is new); 3 frames while it moves, clamped to this frame's neighbourhood (the
+        // resolve's moving rule) -- the jitter is still averaged, but the sun's shadows, which keep no
+        // history of their own, are not dragged along; short while the camera moves, so changing light is
+        // not dragged along; 64 frames on a still view -- enough to average the jitter and what noise is
+        // left, short enough that the GI's own history, not this one, decides how fast it settles.
         // Simple lighting has no noise to average: a short history while moving, so nothing smears.
-        const float imageHistory = frame.sunMoved || s.raw ? 1.0f : frame.moved ? (s.simpleLighting ? 6.0f : 16.0f) : 64.0f;
+        const float imageHistory = s.raw || sunJumped ? 1.0f : frame.sunMoved ? 3.0f : frame.moved ? (s.simpleLighting ? 6.0f : 16.0f) : 64.0f;
         vec4 settings{6.0f, finest * 0.05f, imageHistory, pixelWidth};
         setUniformToValue(renderer, "sunDir", sunDir);
         setUniformToValue(renderer, "frameCount", frameCount);

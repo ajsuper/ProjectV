@@ -71,11 +71,12 @@ void main() {
     vec3 light = hit.hit ? vec3(0.0, 0.0, 0.0)
                          : SUN_COLOR * (pjvPhaseHenyeyGreenstein(dot(view, toSun), restirShafts.z) * total * onset);
 
-    // History, through last frame's camera, unless the sun moved (told) or this is the first frame.
+    // History, through last frame's camera, unless this is the first frame or the sun jumped; while it
+    // moves, at most RESTIR_SUN_MOVING_HISTORY frames of it.
     vec2 res = passTargetRes.xy;
     float n = 0.0;
     vec3 history = vec3(0.0, 0.0, 0.0);
-    if (restirJitter.w < 0.5 && frameCount.z < 0.5) {
+    if (restirJitter.w < 0.5 && frameCount.z < 1.5) {
         bool inFront;
         vec2 then = restirWorldToUV(pjvViewPosition() + view * min(t, 1.0e3), pjvPrevViewPosition(), pjvPrevViewDirection(), res, inFront);
         ivec2 q = ivec2(floor(then * res));
@@ -88,7 +89,7 @@ void main() {
             }
         }
     }
-    n = min(n + 1.0, restirShafts.w);
+    n = min(n + 1.0, frameCount.z > 0.5 ? min(restirShafts.w, RESTIR_SUN_MOVING_HISTORY) : restirShafts.w);
     gl_FragData[0] = vec4(mix(history, light, 1.0 / n), n);
     gl_FragData[1] = vec4(t, 0.0, 0.0, 0.0);
 }

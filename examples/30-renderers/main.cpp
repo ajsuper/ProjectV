@@ -1105,9 +1105,9 @@ void render(projv::Application& app) {
     if (app.frameCount == sunStepAt) g_sunScrollAccum -= 3.0;
     // GALLERY_SUN_SPEED=d starts the sun orbiting d degrees a second. It turns by the wall clock, so at a
     // constant speed whatever the frame rate, and its angle is kept to one turn (from straight down) so the
-    // panel's slider and C stay readable. An orbit is a move, not a change of light: a sun that moves a
-    // little every frame would otherwise start every history over every frame (no image at all, only
-    // noise) -- as a move the histories follow it, a few frames behind.
+    // panel's slider and C stay readable. An orbit is a sun move like any other: restir-pt keeps its
+    // indirect histories short while the sun moves and the direct light none, so the shadows follow it
+    // exactly and the bounce light a few frames behind.
     static const bool sunSpeedSet = [] {
         if (const char* v = std::getenv("GALLERY_SUN_SPEED")) g_sunSpeed = float(std::atof(v));
         return true;
@@ -1134,8 +1134,7 @@ void render(projv::Application& app) {
         if (const char* v = std::getenv("GALLERY_OVERCAST")) g_overcast = std::clamp(float(std::atof(v)), 0.0f, 1.0f);
         return g_overcast;
     }();
-    bool sunMoved = (!sunOrbited && g_sunScrollAccum != prevSunScroll) || (g_overcast != prevOvercast);
-    cameraMoved = cameraMoved || sunOrbited;
+    bool sunMoved = sunOrbited || (g_sunScrollAccum != prevSunScroll) || (g_overcast != prevOvercast);
     prevSunScroll = g_sunScrollAccum;
     prevOvercast = g_overcast;
     // Switching to a renderer is a move for it: its history is from wherever it last drew. So is the panel's

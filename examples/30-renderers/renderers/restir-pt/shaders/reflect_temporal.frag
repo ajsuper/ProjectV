@@ -101,6 +101,7 @@ void main() {
 
         float cap = mix(RESTIR_REFLECT_HISTORY, 4.0,
                         smoothstep(RESTIR_GI_MAX_GLOSSINESS, RESTIR_MIRROR_GLOSSINESS, material.x));
+        if (frameCount.z > 0.5) cap = min(cap, RESTIR_SUN_MOVING_REFLECT);
         newLength = min(historyLength + 1.0, cap);
         colour = mix(history, current.rgb, 1.0 / newLength);
     }

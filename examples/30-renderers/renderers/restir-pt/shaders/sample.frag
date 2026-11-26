@@ -58,12 +58,14 @@ void main() {
     uint rng = seed * 2654435761u + 7u;
     pjvPcg(rng);
 
-    // The history, if this surface was seen last frame. Not on the first frame, nor when the sun moved: a
-    // reservoir's path carries the light it saw, which a new sun has made wrong.
+    // The history, if this surface was seen last frame. Not on the first frame, nor when the sun jumped: a
+    // reservoir's path carries the light it saw, which a new sun has made wrong. When it moved a little the
+    // light is a frame old, so it is kept but counts as at most RESTIR_SUN_MOVING_M samples: this frame's new
+    // path soon replaces it.
     bool history = false;
     bool validate = false;
     ivec2 pp = ivec2(0, 0);
-    if (restirReuse.x > 0.5 && restirJitter.w < 0.5 && frameCount.z < 0.5) {
+    if (restirReuse.x > 0.5 && restirJitter.w < 0.5 && frameCount.z < 1.5) {
         vec2 res = passTargetRes.xy;
         bool inFront;
         vec2 then = restirWorldToUV(s.x, pjvPrevViewPosition(), pjvPrevViewDirection(), res, inFront);
@@ -137,7 +139,7 @@ void main() {
                     h.vis = historyVis;
                     h.M = 1.0;
                 }
-                h.M = min(h.M, restirReuse.w);
+                h.M = min(h.M, frameCount.z > 0.5 ? min(restirReuse.w, RESTIR_SUN_MOVING_M) : restirReuse.w);
                 PtShift shifted = ptSettleReplay(w, h);
                 float target = ptTarget(s, wo1, shifted);
                 // Shifts that change the reconnection's geometry more than 8x either way are refused:
@@ -212,7 +214,7 @@ void main() {
                 h.vis = historyVis;
                 h.M = 1.0;
             }
-            mh = min(h.M, restirReuse.w);
+            mh = min(h.M, frameCount.z > 0.5 ? min(restirReuse.w, RESTIR_SUN_MOVING_M) : restirReuse.w);
             then.x = h.x1;
             then.n = h.n1;
             then.t = length(h.x1 - pjvPrevViewPosition());

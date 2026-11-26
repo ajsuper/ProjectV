@@ -54,7 +54,9 @@
         {"shaderID": 23, "path": "./renderers/restir-pt/shaders/normal_blur.bin"},
         {"shaderID": 24, "path": "./renderers/restir-pt/shaders/reflect.bin"},
         {"shaderID": 25, "path": "./renderers/restir-pt/shaders/reflect_spatial.bin"},
-        {"shaderID": 26, "path": "./renderers/restir-pt/shaders/reflect_temporal.bin"}
+        {"shaderID": 26, "path": "./renderers/restir-pt/shaders/reflect_temporal.bin"},
+        {"shaderID": 27, "path": "./renderers/restir-pt/shaders/shadow_blur.bin"},
+        {"shaderID": 28, "path": "./renderers/restir-pt/shaders/gi_history_fix.bin"}
     ],
     "textures": [
         {"texID": 1, "name": "gPos", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
@@ -116,6 +118,10 @@
         {"texID": 110, "name": "gSoftNormal", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
         {"texID": 111, "name": "reflection", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
         {"texID": 115, "name": "reflectHit", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
+        {"texID": 116, "name": "sunRaw", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
+        {"texID": 117, "name": "sunPenumbra", "format": "RG16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
+        {"texID": 118, "name": "fixDiff", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.25, "origin": "CreateNew"},
+        {"texID": 119, "name": "fixSpec", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.25, "origin": "CreateNew"},
         {"texID": 112, "name": "reflectSpatial", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
         {"texID": 113, "name": "reflectFinal", "format": "RGBA16_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"},
         {"texID": 114, "name": "reflectHistory", "format": "RGBA32_FLOAT", "sizeMode": "relative", "scale": 0.5, "origin": "CreateNew"}
@@ -153,6 +159,8 @@
         {"fboID": 30, "textureIDs": [110]},
         {"fboID": 31, "textureIDs": [111, 115]},
         {"fboID": 32, "textureIDs": [112]},
-        {"fboID": 33, "textureIDs": [113, 114]}
+        {"fboID": 33, "textureIDs": [113, 114]},
+        {"fboID": 34, "textureIDs": [116, 117]},
+        {"fboID": 35, "textureIDs": [118, 119]}
     ]
 }

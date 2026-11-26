@@ -6,10 +6,21 @@ $input v_texcoord0
 //
 // The pixel's visible point is carried through last frame's camera, the four history texels round it are
 // each checked against this surface, and the ones that pass are blended bilinearly. The diffuse history is
-// capped at restirDenoise.w frames. The specular's cap follows the roughness: a mirror's reflection moves
+// capped at restirDenoise.w frames, and cut pixel by pixel where the light changed (below). The specular's cap follows the roughness: a mirror's reflection moves
 // with the view, so it keeps about two frames; a rough lobe's barely does, and keeps as many as the
 // diffuse. (A glossy reflection reprojected at the reflected point's depth, not the surface's, would let
 // it keep more -- not done.)
+//
+// Where the light changed -- the sun moved, something burst into flame, a body's bounce light moved on -- the
+// history is not this light any more, and keeping the full cap would drag the old one along. So each lobe
+// compares its history with this frame's light: the mean over the 3x3 GI pixels of this surface (the paths
+// after spatial reuse), the difference measured in the history's own noise (the standard deviation its
+// moments carry, scaled down for a mean of a few correlated neighbours, plus RESTIR_CHANGE_FLOOR of the
+// light: a few percent is never news). From RESTIR_CHANGE_FROM deviations the cap falls, reaching
+// RESTIR_FAST_HISTORY frames at RESTIR_CHANGE_FULL; a pixel whose light is steady keeps all of it. (kajiya's
+// rtdgi temporal filter does the same, its cap 32 down to 4; NRD takes a confidence for this from re-traced
+// rays.) A still scene therefore keeps a long history -- quiet -- and changing light a short one, only where
+// it changes. docs/plans/restir-gi-confidence.md.
 //
 // It also keeps each one's second moment of luminance, for the variance the a-trous filter scales its
 // luminance test by; a pixel with little history takes its 3x3 neighbourhood's variance instead, so a
@@ -32,6 +43,12 @@ SAMPLER2D(giDiff, 4);
 SAMPLER2D(giSpec, 5);
 SAMPLER2D(surf0, 6);
 SAMPLER2D(surf1, 7);
+
+#define RESTIR_FAST_HISTORY  3.0    // frames: the cap where the light has changed
+#define RESTIR_CHANGE_FROM   2.0    // the history this many deviations from this frame's light: the cap starts to fall
+#define RESTIR_CHANGE_FULL   5.0    // ... and is RESTIR_FAST_HISTORY from here
+#define RESTIR_CHANGE_FLOOR  0.03   // of the light: never counted as a change
+#define RESTIR_MEAN_NOISE    0.6    // a 3x3 mean's deviation, of one pixel's: nine neighbours sharing paths
 
 #define RESTIR_BORROWED_HISTORY 4.0   // frames, at most, for history taken from further away
 
@@ -57,7 +74,7 @@ void main() {
     vec2 moments = vec2(0.0, 0.0);
     float historyLength = 0.0;
     float weight = 0.0;
-    if (restirDenoise.y > 0.5 && restirJitter.w < 0.5 && frameCount.z < 0.5) {   // the sun moved: start over
+    if (restirDenoise.y > 0.5 && restirJitter.w < 0.5) {   // the sun moving shortens it, below
         bool nowInFront;
         bool thenInFront;
         vec2 uvNow = restirWorldToUV(s.x, pjvViewPosition(), pjvViewDirection(), res, nowInFront);
@@ -132,9 +149,31 @@ void main() {
         historyLength = 0.0;
     }
 
+    // How far the history is from this frame's light, per lobe (above).
+    vec2 cap = vec2(restirDenoise.w, restirSpecularCap(pjvBsdfAlpha(s.glossiness)));
+    if (historyLength > RESTIR_FAST_HISTORY) {
+        vec2 now = vec2(0.0, 0.0);
+        float n = 0.0;
+        for (int y = -1; y <= 1; y++)
+            for (int x = -1; x <= 1; x++) {
+                ivec2 q = clamp(p + ivec2(x, y), ivec2(0, 0), ivec2(res) - ivec2(1, 1));
+                RestirSurface o = restirSurface(texelFetch(surf0, q, 0), texelFetch(surf1, q, 0));
+                if (o.t < 0.0 || !restirSameSurface(o.x, o.n, s.x, s.n, s.t)) continue;
+                now += vec2(restirLum(texelFetch(giDiff, q, 0).rgb), restirLum(texelFetch(giSpec, q, 0).rgb));
+                n += 1.0;
+            }
+        now /= max(n, 1.0);
+        vec2 then = vec2(restirLum(diffuseHistory), restirLum(specularHistory));
+        vec2 deviation = sqrt(max(moments - then * then, vec2(0.0, 0.0))) * RESTIR_MEAN_NOISE
+                       + RESTIR_CHANGE_FLOOR * max(then, now) + vec2(1e-4, 1e-4);
+        vec2 z = abs(then - now) / deviation;
+        vec2 confidence = vec2(1.0, 1.0) - smoothstep(vec2(RESTIR_CHANGE_FROM, RESTIR_CHANGE_FROM),
+                                                      vec2(RESTIR_CHANGE_FULL, RESTIR_CHANGE_FULL), z);
+        cap = min(cap, mix(vec2(RESTIR_FAST_HISTORY, RESTIR_FAST_HISTORY), cap, confidence));
+    }
     bool accumulate = restirDenoise.y > 0.5;
-    float diffuseLength = min(historyLength + 1.0, accumulate ? restirDenoise.w : 1.0);
-    float specularLength = min(historyLength + 1.0, accumulate ? restirSpecularCap(pjvBsdfAlpha(s.glossiness)) : 1.0);
+    float diffuseLength = min(historyLength + 1.0, accumulate ? cap.x : 1.0);
+    float specularLength = min(historyLength + 1.0, accumulate ? cap.y : 1.0);
     float a = historyLength > 0.0 ? 1.0 / diffuseLength : 1.0;
     float b = historyLength > 0.0 ? 1.0 / specularLength : 1.0;
     diffuseHistory = mix(diffuseHistory, diffuse, a);

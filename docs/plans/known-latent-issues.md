@@ -369,6 +369,17 @@ by the real clock) the piece is big enough, but `./physics --headless` (one step
 borderline: 50-60% in some windowed runs. Fix: build the walker's obstacle and the shards' target
 for the test (a piece of known size, a strike of known energy) rather than picking from what F made.
 
+## 27. The Teardown converter corrupts the heap on some levels unless it runs on one thread
+
+`mesh_voxelizer --td-level evertidesmall --no-transparent` (with or without water) died in all three
+multi-threaded runs tried, while writing `world.data`: `corrupted size vs. prev_size in fastbins` or a segfault, in
+`~BrickData` freeing a worker's brick map (`teardown/writer.cpp` `buildData`, the block-building
+threads). The same level converts cleanly with `--threads 1`, under gdb, and without
+`--no-transparent`, and the same conversion succeeded on 2026-10-22, so it is a race (or an
+out-of-bounds write on a worker thread) that came in since then. Not found: no sanitizer runtime is
+installed on the machine where it was seen. Workaround: `--threads 1` (the output is the same bytes).
+Next step: an ASan/TSan build of `mesh_voxelizer` on that level.
+
 ## 28. The NVIDIA driver's shader compiler dies with SIGBUS in the Santa Fe demo
 
 Found 2026-11-23 in `examples/56-santa-fe` (`./santa_fe`, commit `1c17693`), on the NVIDIA 580.119.02
@@ -402,3 +413,13 @@ the scene's textures first, so a pass's own inputs win the collision and only th
 are lost; none of these passes reads the scene, so nothing is drawn wrong today. It becomes a bug if one of them starts to
 trace the voxels. Fix if so: fewer inputs (split the trace's eight targets, or read what is needed from a smaller
 target).
+
+## 30. The dev layer's Log panel crashed formatting the log
+
+Found 2026-11-23 in `./santa_fe` (S21's build), 6 s in, while the world generated and the renderer logged
+heavily: SIGSEGV in `fmt::detail::buffer::append`, from `spdlog::sinks::ringbuffer_sink_mt::last_formatted`,
+from `logPanel` (`src/ui/dev/dev_layer.cpp`, the Log window). The message it was formatting looked intact
+(`[PRF] uploadTexelSpan: ...`). The sink is the thread-safe one (4000 messages), so this is either a spdlog
+defect or memory corrupted elsewhere; one crash, not reproduced. Note also that the panel formats the whole
+ring every frame (`last_formatted(0)`), which is slow with a full ring. Next step if it recurs: an ASan build
+of the demo.

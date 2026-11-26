@@ -35,7 +35,19 @@
 #include <pjv_atmosphere.sc>  // the height layers' optical depth, in closed form
 
 #include <pjv_engine.sc>   // passTargetRes, passInputRes: engine-set
-uniform vec4 frameCount;      // x = frame index, y = 1 when the camera or the sun moved this frame, z = 1 when the sun did
+uniform vec4 frameCount;      // x = frame index, y = 1 when the camera or the sun moved this frame, z the sun:
+                              // 1 it moved a little (an orbit's step, a drag), 2 it jumped (restir_pt.h)
+
+// While the sun moves the indirect light's histories are kept, but short: a little lag in the bounce light
+// rather than every history starting over each frame (the image boiled -- one path a GI pixel, denoised,
+// new every frame). The GI accumulation shortens its own, pixel by pixel, where the light changed
+// (gi_accumulate.frag); the others below. When it jumps, the reservoirs and the shafts start over: their
+// light is of another sun. The direct sun keeps no history (shadow_soft, shadow_blur), so it never lags; the
+// image's resolve keeps a few frames, clamped to this frame's neighbourhood, and none after a jump
+// (restir_pt.h).
+#define RESTIR_SUN_MOVING_HISTORY 8.0   // the light shafts, frames at most
+#define RESTIR_SUN_MOVING_M       2.0   // a temporal reservoir's M at most: its cached light is a frame old
+#define RESTIR_SUN_MOVING_REFLECT 4.0   // the glossy reflection's history, frames at most (it shows the sun's glint)
 uniform vec4 restirReuse;     // x temporal reuse, y spatial reuse, z visibility re-test, w temporal M cap
 uniform vec4 restirDenoise;   // x a-trous on, y GI accumulation on, z view (G), w the diffuse GI history cap
 uniform vec4 restirJitter;    // xy this frame's offset inside the block, z the GI stride in render texels (2; 1 for

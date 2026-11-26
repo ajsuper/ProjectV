@@ -15,9 +15,14 @@ $input v_texcoord0
 //      penumbra (none found: nothing to soften -- a lit texel far from a shadow, or a shadow's interior);
 //   2. average the sun's visibility over a disc of that width, on this surface only (plane and normal),
 //      so a shadow does not soften across a step onto another face.
-// The taps turn a little each frame; the resolve's accumulation smooths what is left of the pattern.
+// The taps turn each frame and per pixel; shadow_blur.frag then averages what is left of the pattern over a
+// share of the penumbra's width, on the surface, so the penumbra is smooth in each frame alone -- not only
+// once the resolve has accumulated it, which it cannot while the sun moves (the direct light keeps no
+// history that could lag the sun).
 //
-// Output: rgb the sun's light leaving the surface towards the camera (BSDF x sun x cosine x visibility), a 0.
+// Outputs: sunRaw -- rgb the sun's light leaving the surface towards the camera unshadowed (BSDF x sun x
+// cosine), a the visibility; sunPenumbra -- r the penumbra's half-width in render texels (0: a hard edge or
+// none, nothing for the blur to do).
 // Inputs: 0-5 the G-buffer (gPos 0, gNormal 1 -- w the blocker distance, gAlbedo 2 -- a the visibility,
 // gDirect 3 -- a the material); 7 gSoftNormal (resource): the blurred normal the light is shaded with
 // (normal_blur.frag) -- the shadow's plane and normal tests keep the G-buffer's.
@@ -34,7 +39,7 @@ SAMPLER2D(gDirect, 3);
 SAMPLER2D(gSoftNormal, 7);
 
 #define SOFT_SEARCH_TAPS 16
-#define SOFT_FILTER_TAPS 24
+#define SOFT_FILTER_TAPS 32
 #define SOFT_MAX_RADIUS 16.0   // render texels: the widest half-penumbra, and how far step 1 looks
 
 // The i-th of n points of a golden-angle spiral filling the unit disc, turned by `turn`.
@@ -47,7 +52,7 @@ vec2 softDisc(int i, int n, float turn) {
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     vec4 surface = texelFetch(gPos, p, 0);
-    if (surface.w < 0.0) { gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); return; }
+    if (surface.w < 0.0) { gl_FragData[0] = vec4(0.0, 0.0, 0.0, 0.0); gl_FragData[1] = vec4(0.0, 0.0, 0.0, 0.0); return; }
     vec4 nb = texelFetch(gNormal, p, 0);
     vec4 ab = texelFetch(gAlbedo, p, 0);
     vec3 P = surface.xyz;
@@ -64,7 +69,8 @@ void main() {
     float pdf;
     pjvBsdfEvaluate(bsdf, shadingN, normalize(pjvViewPosition() - P), toSun, f, pdf);
     vec3 sunLit = f * SUN_COLOR * facing;
-    if (facing <= 0.0 || restirLook.z <= 0.0) { gl_FragColor = vec4(sunLit * ab.a, 0.0); return; }
+    gl_FragData[1] = vec4(0.0, 0.0, 0.0, 0.0);
+    if (facing <= 0.0 || restirLook.z <= 0.0) { gl_FragData[0] = vec4(sunLit, ab.a); return; }
 
     ivec2 last = ivec2(passTargetRes.xy) - ivec2(1, 1);
     float texel = max(restirSettings.w * surface.w, 1.0e-4);           // a render texel's width here
@@ -83,7 +89,7 @@ void main() {
         if (texelFetch(gAlbedo, q, 0).a < 0.5 && qn.w > 0.0) { blockers += qn.w; found += 1.0; }
     }
     float radius = found > 0.0 ? min(0.5 * (blockers / found) * restirLook.z / texel, SOFT_MAX_RADIUS) : 0.0;
-    if (radius < 0.5) { gl_FragColor = vec4(sunLit * ab.a, 0.0); return; }
+    if (radius < 0.5) { gl_FragData[0] = vec4(sunLit, ab.a); return; }
 
     // 2. The visibility over the penumbra's disc, on this surface.
     float sum = ab.a;
@@ -95,5 +101,6 @@ void main() {
         sum += texelFetch(gAlbedo, q, 0).a;
         weight += 1.0;
     }
-    gl_FragColor = vec4(sunLit * (sum / weight), 0.0);
+    gl_FragData[0] = vec4(sunLit, sum / weight);
+    gl_FragData[1] = vec4(radius, 0.0, 0.0, 0.0);
 }
